@@ -39,21 +39,21 @@ class Accumulator:
         self.radius = 20
         self.cloud_array = None
         self.voxel_array = None
+        self.bounded = None
 
         #Cum Cloud
         self.cum_cloud = None
 
         #Timer
-        rospy.Timer(rospy.Duration(.5), self.on_timer)  # 10 Hz
+        rospy.Timer(rospy.Duration(.1), self.on_timer)  # 10 Hz
 
     def publ(self):
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
-        self.cum_cloud = point_cloud2.create_cloud_xyz32(header, self.voxel_array)
+        self.cum_cloud = point_cloud2.create_cloud_xyz32(header, self.bounded)
         self.pub.publish(self.cum_cloud)
         
-        #TODO call the make_cloud func and publish
     
-    def cloud_to_xyz(self, msg):
+    def cloud_to_xyz(self, msg): #TODO comment
         # For FAST-LIO's /cloud_registered: x,y,z are float32 at offsets 0,4,8
         dtype = np.dtype([
             ('x', np.float32), ('y', np.float32), ('z', np.float32),
@@ -72,11 +72,20 @@ class Accumulator:
         with self.lock:
             # self.latest_cloud = np.array(list(point_cloud2.read_points(msg, field_names = ("x", "y", "z"), skip_nans = True))) # puts the message x and y values into latest_cloud n x 2 rows
             self.latest_cloud = self.cloud_to_xyz(msg) 
-            # print("one cloud:  ", self.latest_points, "\n")
-            print("sh of one cloud: ", np.shape(self.latest_cloud))
-            # print("sh of asdfasdfcloud: ", np.shape(self.latest_points[0,:]))
-            if len(self.latest_cloud) : self.cloud_list.append(self.latest_cloud) # this adds to cloud_list, the deque, list of n x 2 rows/coords 
+
+        #TODO call downsmapel func
+        if len(self.latest_cloud):
+            self.down_cloud(self.latest_cloud)
+        # # print("one cloud:  ", self.latest_points, "\n")
+        # print("sh of one cloud: ", np.shape(self.latest_cloud))
+        # # print("sh of asdfasdfcloud: ", np.shape(self.latest_points[0,:]))
+        # if len(self.latest_cloud) : self.cloud_list.append(self.latest_cloud) # this adds to cloud_list, the deque, list of n x 2 rows/coords 
             
+    def down_cloud(self, cloud):
+        bins = np.floor( cloud / self.voxel_size) 
+        # pos_bins = bins - np.min(bins) 
+
+        self.voxel_array = self.voxel_size * np.unique(bins, axis = 0)
 
     def make_cloud(self, odom):
         # print("DIST ODOM: ", odom, "\n")
@@ -85,37 +94,33 @@ class Accumulator:
         Odomy = odom.y
         Odomz = odom.z
 
-        if len(self.cloud_list): 
-            self.cloud_array = np.vstack(self.cloud_list) # turns cloud list to an numpy array, long long list of all teh coordinates inside of cloud_list
+    
+        self.cloud_array = np.vstack(self.voxel_array) # turns cloud list to an numpy array, long long list of all teh coordinates inside of cloud_list
 
-            # print("Cloud array shape: ", np.shape(self.cloud_array))
+        # print("Cloud array shape: ", np.shape(self.cloud_array))
 
-            disx = self.cloud_array[:,0] - self.latest_pos.x
-            disy = self.cloud_array[:,1] - self.latest_pos.y
-            disz = self.cloud_array[:,2] - self.latest_pos.z
+        disx = self.cloud_array[:,0] - self.latest_pos.x
+        disy = self.cloud_array[:,1] - self.latest_pos.y
+        disz = self.cloud_array[:,2] - self.latest_pos.z
 
 
-            xyzdist = np.column_stack((disx,disy,disz))
-            # print("shape of x_and_y: ", np.shape((x_and_y)),"\n")
-            # print("x_and_y: ", x_and_y, '\n') 
+        xyzdist = np.column_stack((disx,disy,disz))
+        # print("shape of xyzdist: ", np.shape((xyzdist)),"\n")
+        # print("xyzdist: ", xyzdist, '\n') 
 
-            norms = np.linalg.norm(xyzdist, axis = 1) # find norm given drone relative distance of x and y concatenated,
-            # print("shape of norm: ", np.shape(norms),"\n")
-            # print("Norm: ", norms, '\n') 
-            bounded = self.cloud_array[norms < self.radius] #boolean mask to save bounded cloud points
-            # print("BOUNDED: ", bounded)
-            # print("cloud_array size: ", np.shape(self.cloud_array), '\n')
-            # print("BOUNDED size: ", np.shape(bounded))
+        norms = np.linalg.norm(xyzdist, axis = 1) # find norm given drone relative distance of x and y concatenated,
+        # print("shape of norm: ", np.shape(norms),"\n")
+        # print("Norm: ", norms, '\n') 
+        self.bounded = self.cloud_array[norms < self.radius] #boolean mask to save bounded cloud points
+        print("BOUNDED: ", self.bounded)
+        print("cloud_array size: ", np.shape(self.cloud_array), '\n')
+        print("BOUNDED size: ", np.shape(self.bounded))
 
-            #Make new bounded down-sampled cloud w/ voxel s, tuff
-            if len(bounded):
-                self.voxel_array = self.voxel_size * np.unique(np.round( bounded / self.voxel_size), axis = 0) #voxel array of unique, occupied voxel spots 
+        # print("Voxel array 1ST TEN COOR: ", self.voxel_array[0:10,:])
+        # print("bounded array 1ST TEN COOR: ", self.bounded.shape, "\n")
+        # print("odommy:", self.latest_pos, "\n")
 
-            print("Voxel array 1ST TEN COOR: ", self.voxel_array[0:10,:])
-            print("bounded array 1ST TEN COOR: ", bounded.shape, "\n")
-            print("odommy:", self.latest_pos, "\n")
-
-            return 1
+        return 1
 
 
     def run(self):
