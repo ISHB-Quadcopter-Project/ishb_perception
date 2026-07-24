@@ -91,10 +91,10 @@ class Accumulator:
             PointField('y', 4, PointField.FLOAT32, 1),
             PointField('z', 8, PointField.FLOAT32, 1),
         ]
-        msg.is_bigendian = False
+        msg.is_bigendian = False #little endian
         msg.point_step = 12
         msg.row_step = 12 * points.shape[0]
-        msg.is_dense = True
+        msg.is_dense = True #Assume no NaN
         msg.data = points.tobytes()
         return msg
 
@@ -128,9 +128,11 @@ class Accumulator:
     def cloud_cb(self, msg):
         self.latest_cloud = self.cloud_to_xyz(msg) 
 
+        reduced = self.down_cloud(self.latest_cloud) #Downsample outside lock to avoid thread being locked excessively
+
         with self.lock:
             if len(self.latest_cloud):
-                self.cloud_list.append(self.down_cloud(self.latest_cloud))
+                self.cloud_list.append(reduced)
         
     def down_cloud(self, cloud):
         #This get's the bin num, for assigning bin indexes to each downsampled voxel box
