@@ -24,23 +24,27 @@ class TreeFinder:
         #Publish beacon/waypoint for found trees
         self.pub = rospy.Publisher("/Tree_Cand", PointStamped, queue_size = 10)
 
-        self.pubT = rospy.Publisher("/Z", PointCloud2, queue_size = 10)
+        self.pub_cloud_1 = rospy.Publisher("/Z1", PointCloud2, queue_size = 10)
+        self.pub_cloud_2 = rospy.Publisher("/Z2", PointCloud2, queue_size = 10)
 
         #Sub to cum cloud
         self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
         self.cloud_section_one = None
+        self.cloud_section_two = None
+
         #Timer
         rospy.Timer(rospy.Duration(5), self.on_timer)  # 10 Hz
 
         self.latest_cloud = None
-        self.processed_cloud = None
+        self.processed_cloud_low = None 
+        self.processed_cloud_high = None
         self.tree_cands = None
 
         self.z_low_one = round(5 * 0.067, 5)
         self.z_high_one = round(10 * 0.067, 5)
 
-        self.z_low_two = round(30 * 0.067, 5)
-        self.z_high_two = round(160 * 0.067, 5)
+        self.z_low_two = round(15 * 0.067, 5)
+        self.z_high_two = round(20 * 0.067, 5)
 
 
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
@@ -54,7 +58,9 @@ class TreeFinder:
         if self.debug_plot:
             os.makedirs(self.plot_dir, exist_ok=True)
             self._fig, self._ax = plt.subplots(figsize=(6, 6), dpi=90)
-            self._last_plot = rospy.Time(0)
+            self._last_plot_tall = rospy.Time(0)
+            self._last_plot_short = rospy.Time(0)
+
 
         
 
@@ -67,7 +73,9 @@ class TreeFinder:
             self.latest_cloud = self.cloud_to_xyz(msg) 
 
             # with self.lock:
-            self.processed_cloud = self.cut_cloud(self.latest_cloud, self.z_low_one, self.z_high_one)
+            self.processed_cloud_low = self.cut_cloud(self.latest_cloud, self.z_low_one, self.z_high_one)
+
+            self.processed_cloud_high = self.cut_cloud(self.latest_cloud, self.z_low_two, self.z_high_two)
             # print("HERE is cut for 1st z: ", self.processed_cloud)
 
     
@@ -107,15 +115,25 @@ class TreeFinder:
         #Only grabbing indices of the unique pos x,y in 1D key (np.unique beta w/).
         _, first = np.unique(key, return_index = True) 
 
+        #Below is for rviz publishing
         #Return cut_cloud with indices that only include uniqe x,y's
         # print("HERE is shape not_includez: : ", np.shape(cut_cloud[first,0:2]))    
-        self.cloud_section_one =cut_cloud[first]
+        if(z_low == self.z_low_one):
+            self.cloud_section_one =cut_cloud[first]
+        else:
+            self.cloud_section_two =cut_cloud[first]
+
+
         return cut_cloud[first,0:2] 
 
     def publ(self):
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
-        dddd = self.make_pointcloud2_xyz32(header, self.cloud_section_one)
-        self.pubT.publish(dddd)
+        cloud1 = self.make_pointcloud2_xyz32(header, self.cloud_section_one)
+        cloud2 = self.make_pointcloud2_xyz32(header, self.cloud_section_two)
+
+        self.pub_cloud_1.publish(cloud1)
+        self.pub_cloud_2.publish(cloud2)
+
 
     def make_pointcloud2_xyz32(self, header, points):
             """Build an XYZ32 PointCloud2 via one tobytes() instead of a Python
@@ -142,7 +160,8 @@ class TreeFinder:
     
          
     #TODO func to cluster data and find poss trees
-    def clustering(self, points):
+    def clustering(self, points, which):
+        
         """points: (N,2) or (N,3) float array, metres.
         Returns (labels, n_clusters). Label -1 == noise."""
         if points.shape[0] < self.min_samples: #num of coordinates to cluster < min samples
@@ -169,14 +188,20 @@ class TreeFinder:
             xy.shape[0], n_clusters, n_noise)
 
         if self.debug_plot:
-            now = rospy.Time.now()
-            if (now - self._last_plot).to_sec() >= self.plot_period: #This ensure plots are only created every plot period
-                self._last_plot = now
-                self._save_cluster_plot(xy, labels, n_clusters, now)
+            if which:
+                now_short = rospy.Time.now()
+                if (now_short - self._last_plot_short).to_sec() >= self.plot_period: #This ensure one short plot is created every plot period
+                    self._last_plot_short = now_short
+                    self._save_cluster_plot(xy, labels, n_clusters, now_short ,which)
+            else:
+                now_tall = rospy.Time.now()
+                if (now_tall - self._last_plot_tall).to_sec() >= self.plot_period: #This ensure one tall plot is created every plot period
+                    self._last_plot_tall = now_tall
+                    self._save_cluster_plot(xy, labels, n_clusters, now_tall ,which)                    
 
         return labels, n_clusters
 
-    def _save_cluster_plot(self, xy, labels, n_clusters, stamp):
+    def _save_cluster_plot(self, xy, labels, n_clusters, stamp ,which):
         ax = self._ax
         ax.cla()
 
@@ -195,24 +220,39 @@ class TreeFinder:
                 ax.annotate(str(k), (xy[m, 0].mean(), xy[m, 1].mean()),
                             fontsize=7, color="k",
                             ha="center", va="center")
+            
 
         ax.set_aspect("equal", adjustable="datalim")
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
-        ax.set_title("DBSCAN eps=%.2f min_samples=%d - %d clusters"
-                     % (self.eps, self.min_samples, n_clusters))
+
+        print("HERE is which value: ", which)
+        if which:
+            ax.set_title("DBSCAN eps=%.2f min_samples=%d - %d clusters, Taller Z"
+                         % (self.eps, self.min_samples, n_clusters))
+            path = os.path.join(self.plot_dir, "TALL_clusters_%.2f.png" % stamp.to_sec())
+            self._fig.savefig(path, bbox_inches="tight")
+            rospy.loginfo("wrote %s", path)
+
+        else: 
+            ax.set_title("DBSCAN eps=%.2f min_samples=%d - %d clusters, Shorter Z"
+                         % (self.eps, self.min_samples, n_clusters))
+            path = os.path.join(self.plot_dir, "SHORT_z_clusters_%.2f.png" % stamp.to_sec())
+            self._fig.savefig(path, bbox_inches="tight")
+            rospy.loginfo("wrote %s", path)
+    
         ax.grid(True, linewidth=0.3, alpha=0.5)
 
-        path = os.path.join(self.plot_dir, "clusters_%.2f.png" % stamp.to_sec())
-        self._fig.savefig(path, bbox_inches="tight")
-        rospy.loginfo("wrote %s", path)
+        
 
          
     #TODO ontimer functin, reads possible trees, does beacon publishing
     def on_timer(self,event):
-        if len(self.processed_cloud):
-            self.clustering(self.processed_cloud)
+        if len(self.processed_cloud_low) and len(self.processed_cloud_high):
+            self.clustering(self.processed_cloud_low, 0)
+            self.clustering(self.processed_cloud_high, 1)
             self.publ()           
+
 
 
     
