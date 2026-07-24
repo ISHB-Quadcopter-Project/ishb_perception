@@ -29,7 +29,7 @@ class TreeFinder:
         self.latest_cloud = None
         self.processed_cloud = None
         self.tree_cands = None
-        self.z_cut_one = 5
+        self.z_cut_one = 4.3885
         self.z_cut_two = 10
 
 
@@ -41,25 +41,28 @@ class TreeFinder:
             self.latest_cloud = self.cloud_to_xyz(msg) 
 
             # with self.lock:
-            print("HERE is cut for 1st z: ", self.cut_cloud(self.latest_cloud, self.z_cut_one))
+            print(self.z_cut_one,"HERE is cut for 1st z: ", self.cut_cloud(self.latest_cloud, self.z_cut_one))
 
     #TODO func to do 2d slice of cloud data, think optimizing, don't jsut do 1 slice, do 2-3 to know its a tree (ver. cyl ah shape ish)
     def cut_cloud(self, uncut_cloud, z_height):
-        bobby = []
-        # print("uncut cloud z col: ", uncut_cloud[:,2])
-        for vox_number in self.voxel_range(self.z_cut_one, 50):
-            bobby.append(uncut_cloud[uncut_cloud[:,2]== vox_number.astype(float32)])
-            print(vox_number)
-        return bobby
+        print("HERE is pre processed z: ", uncut_cloud[:,2])
+        return uncut_cloud[uncut_cloud[:,2]== z_height]
+         
+        # bobby = []
+        # # print("uncut cloud z col: ", uncut_cloud[:,2])
+        # for vox_number in self.voxel_range(self.z_cut_one, 50):
+        #     bobby.append(uncut_cloud[uncut_cloud[:,2]== vox_number.astype(float32)])
+        #     print(vox_number)
+        # return bobby
 
-    def voxel_range(self, lower, voxel_list_l):
-        voxel_list = []
-        j = 1
-        for i in range(voxel_list_l):
-            voxel_list.append(lower * 0.067 * j)
-            j += 1
-        # print(voxel_list)
-        return voxel_list
+    # def voxel_range(self, lower, voxel_list_l):
+    #     voxel_list = []
+    #     j = 1
+    #     for i in range(voxel_list_l):
+    #         voxel_list.append(lower * 0.067 * j)
+    #         j += 1
+    #     # print(voxel_list)
+    #     return voxel_list
 
 
     def cloud_to_xyz(self, msg):
