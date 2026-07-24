@@ -145,7 +145,7 @@ class Accumulator:
         #Only grabbing indices of the unique pos x,y,z in 1D key (np.unique beta w/). Note these alr been voxeled
         _, first = np.unique(key, return_index = True) 
 
-        #Now we have the indices of the unique voxel bins, we now use the og array of voxel bins, scaling by voxel size. 
+        #Now we have the indices of the unique voxel bins b/c first collerates to rows, we now use the og array of voxel bins, scaling by voxel size. 
         voxel_cen = (bins[first] + 0.5) * self.voxel_size #Adding +0.5 to move from corner voxel box to center
 
         return voxel_cen
