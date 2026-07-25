@@ -22,7 +22,7 @@ class TreeFinder:
         self.lock = threading.Lock()
 
         #Publish beacon/waypoint for found trees
-        self.pub = rospy.Publisher("/Tree_Cand", PointStamped, queue_size = 10)
+        self.pub_beacon = rospy.Publisher("/Beacons", PointCloud2, queue_size = 10)
 
         self.pub_cloud_1 = rospy.Publisher("/Z1", PointCloud2, queue_size = 10)
         self.pub_cloud_2 = rospy.Publisher("/Z2", PointCloud2, queue_size = 10)
@@ -33,7 +33,7 @@ class TreeFinder:
         self.cloud_section_two = None
 
         #Timer
-        rospy.Timer(rospy.Duration(5), self.on_timer)  # 10 Hz
+        rospy.Timer(rospy.Duration(0.1), self.on_timer)  # 10 Hz
 
         self.latest_cloud = None
         self.processed_cloud_low = None 
@@ -45,7 +45,8 @@ class TreeFinder:
 
         self.z_low_two = round(15 * 0.067, 5)
         self.z_high_two = round(20 * 0.067, 5)
-
+        self.xy = None
+        self.centroid_list = None
 
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
@@ -130,9 +131,12 @@ class TreeFinder:
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
         cloud1 = self.make_pointcloud2_xyz32(header, self.cloud_section_one)
         cloud2 = self.make_pointcloud2_xyz32(header, self.cloud_section_two)
+        beacons = self.make_pointcloud2_xyz32(header, self.centroid_list)
+
 
         self.pub_cloud_1.publish(cloud1)
         self.pub_cloud_2.publish(cloud2)
+        self.pub_beacon.publish(beacons)
 
 
     def make_pointcloud2_xyz32(self, header, points):
@@ -158,7 +162,6 @@ class TreeFinder:
             msg.data = points.tobytes()
             return msg
     
-         
     #TODO func to cluster data and find poss trees
     def clustering(self, points, which):
         
@@ -169,15 +172,16 @@ class TreeFinder:
 
         #creates pointer to the points array, as long as the type is dtype 
         #more efficient than np.array which makes new nparray object, this is like a conditional to make sure of the type, and an C (call by ref) array
-        xy = np.asarray(points[:, :2], dtype=np.float64) 
+        self.xy = np.asarray(points[:, :2], dtype=np.float64) 
         
+
         #creates scanning object, db
         #epsilon = neighborhood radius param
         #min samples/points per cluster 
         db = DBSCAN(eps=self.eps, min_samples=self.min_samples) 
 
         #returns numpy 1D array of labels(int numwhich cluster each point belongs) aligned with the rows of xy asarray
-        labels = db.fit_predict(xy)
+        labels = db.fit_predict(self.xy)
 
         #Set on labels to get the unique labels of the label array (that's for every pt)
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0) #subtracts 1 if outlier
@@ -185,22 +189,41 @@ class TreeFinder:
 
         rospy.loginfo_throttle(
             1.0, "DBSCAN: %d pts -> %d clusters, %d noise",
-            xy.shape[0], n_clusters, n_noise)
+            self.xy.shape[0], n_clusters, n_noise)
 
         if self.debug_plot:
             if which:
                 now_short = rospy.Time.now()
                 if (now_short - self._last_plot_short).to_sec() >= self.plot_period: #This ensure one short plot is created every plot period
                     self._last_plot_short = now_short
-                    self._save_cluster_plot(xy, labels, n_clusters, now_short ,which)
+                    self._save_cluster_plot(self.xy, labels, n_clusters, now_short ,which)
             else:
                 now_tall = rospy.Time.now()
                 if (now_tall - self._last_plot_tall).to_sec() >= self.plot_period: #This ensure one tall plot is created every plot period
                     self._last_plot_tall = now_tall
-                    self._save_cluster_plot(xy, labels, n_clusters, now_tall ,which)                    
+                    self._save_cluster_plot(self.xy, labels, n_clusters, now_tall ,which)                    
 
         return labels, n_clusters
 
+    def centroid_finder(self):
+        if len(self.processed_cloud_low): #and len(self.processed_cloud_high):
+                    labels, n_clusters = self.clustering(self.processed_cloud_low, 0)
+                    # print("labels shape ::::::::::",labels.shape)
+                    # print("xy ::::::::::",self.xy.shape)
+                    # print("labels == 3::::::::::",(labels == 3).shape)
+
+                    #self.clustering(self.processed_cloud_high, 1) 
+        self.centroid_list = np.zeros((n_clusters-1,3))
+
+        for clustnum in range(n_clusters-1):
+            curr_clust = self.xy[labels == clustnum]
+            xmean = np.mean(curr_clust[:,0])
+            ymean = np.mean(curr_clust[:,1])
+            self.centroid_list[clustnum,0] = xmean
+            self.centroid_list[clustnum,1] = ymean
+            self.centroid_list[clustnum,2] = 1.67
+            print("HERE is self.centriod_list: ", self.centroid_list)
+  
     def _save_cluster_plot(self, xy, labels, n_clusters, stamp ,which):
         ax = self._ax
         ax.cla()
@@ -248,9 +271,10 @@ class TreeFinder:
          
     #TODO ontimer functin, reads possible trees, does beacon publishing
     def on_timer(self,event):
-        if len(self.processed_cloud_low) and len(self.processed_cloud_high):
-            self.clustering(self.processed_cloud_low, 0)
-            self.clustering(self.processed_cloud_high, 1)
+        self.centroid_finder()
+        if len(self.processed_cloud_low): #and len(self.processed_cloud_high):
+            # self.clustering(self.processed_cloud_low, 0)
+            #self.clustering(self.processed_cloud_high, 1)
             self.publ()           
 
 
