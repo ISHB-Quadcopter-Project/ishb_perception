@@ -14,6 +14,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import deque 
 
+
+
 #TODO We want to do two things A) find poss trees B) sep class at least, goes up to poss tree, and estimates radius, and reonsiders dist from tree for cam, and reconsiders tree placements
 #b would happen before and while going towards tree, 
 #When state 3 happens (assecnetion), that's when we know for certain the rad of the tree, and can accurately place waypt,next waypoint can b determined
@@ -38,7 +40,6 @@ class TreeFinder:
         self.latest_cloud = None
         self.processed_cloud_low = None 
         self.processed_cloud_high = None
-        self.tree_cands = None
         
         self.pancake_stacks = 5
         self.pancake_start = round(5 * 0.067, 5)
@@ -68,6 +69,11 @@ class TreeFinder:
 
         self.publish_list = [[1000000000,10000000000,100000000000]]
 
+        #Tree Confirmation Parameters
+
+        #Step 1: Is Line
+        self.hor_rms_threshold = 0.8 #Measure of how spread horizontally
+        self.elongation_num_threshold = 0.2 #ranges 0-1, higher is more "circular"
         
 
 
@@ -116,10 +122,20 @@ class TreeFinder:
             if len(self.processed_cloud_list):
                 for pancake_num in range(self.pancake_stacks):
                     e_array = self.centroid_finder(pancake_num) #TODO pass in which and for loop maybe here, passing in "which", the index of processed_cloud_list
-                    self.cand_trees[pancake_num] = e_array
-            # print("HERE is self.cand_tree: ", self.cand_trees)
-            # print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
 
+                    if e_array is not None:
+                        # not_zero_mask = [e_array != (0,0,0,0,0,0)]
+                        print("EARRAY: ", e_array)
+                        print("EARRAY shape: ", e_array.shape)
+
+                        not_zero_mask = np.any(e_array != 0, axis =1)
+                        print("HERE IS not zero mask: ", not_zero_mask)
+                        cleaned_e_array = e_array[not_zero_mask]
+
+                        self.cand_trees[pancake_num] = cleaned_e_array
+            print("HERE is self.cand_tree: ", self.cand_trees)
+            print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
+            
             self.publ()
         #TODO  call cluster categorizing steps 2-4 funcs here
 
@@ -140,40 +156,25 @@ class TreeFinder:
                 xmean = np.mean(curr_clust[:,0])
                 ymean = np.mean(curr_clust[:,1])
 
-                #TODO this centriod list is used when publishing beacon
-                self.centroid_list[clustnum,0] = xmean
-                self.centroid_list[clustnum,1] = ymean
-                self.centroid_list[clustnum,2] = 1.67
-                # print("HERE is self.centriod_list: ", self.centroid_list)
+                #Getting relevant cluster info from eigen func
+                hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
 
-                hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean) #Getting relevant cluster info from eigen func
+                if not self.is_line(hor_rms, elongation_num):
+                    #TODO centriod list artifact?
+                    self.centroid_list[clustnum,0] = xmean
+                    self.centroid_list[clustnum,1] = ymean
+                    self.centroid_list[clustnum,2] = 1.67
+                    # print("HERE is self.centriod_list: ", self.centroid_list)
 
-                #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
-                e_array[clustnum] = [hor_rms, ver_rms, elongation_num, clustnum,xmean,ymean]
+                    #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
+                    e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
+
+                    # print("HER is e_array shape: ", e_array.shape)
+                #TODO if else statement for returned value for is big func
+                
+
 
             return e_array
-
-    def eigen(self, curr_clust, xmean, ymean):
-        normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
-        #  print("HERE is normalized shape: ", normalized.shape)
-
-        cov_matrix = np.cov(normalized, rowvar = False)
-        #  print("HERE is cov matrix: ", cov_matrix)
-        #  print("HERE is cov matrix shape: ", cov_matrix.shape)
-
-        eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
-        # print("Eigenvalues:\n", eigenvalues)
-        # print("Eigenvectors:\n", eigenvectors)
-        hor_rms = math.sqrt(eigenvalues[0])
-        ver_rms = math.sqrt(eigenvalues[1])
-
-        elongation_num = math.sqrt(hor_rms/ver_rms)
-
-        # print("HERE is hor_rms: ", hor_rms)
-        # print("HERE is ver_rms: ", ver_rms)
-        # print("HERE is elong: ", elongation_num)
-
-        return hor_rms, ver_rms, elongation_num  
 
     def clustering(self, points, which): 
         
@@ -268,6 +269,41 @@ class TreeFinder:
     
 
 
+
+    #------Tree Confirmation Step Func-----
+    def eigen(self, curr_clust, xmean, ymean):
+            normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
+            #  print("HERE is normalized shape: ", normalized.shape)
+    
+            cov_matrix = np.cov(normalized, rowvar = False)
+            #  print("HERE is cov matrix: ", cov_matrix)
+            #  print("HERE is cov matrix shape: ", cov_matrix.shape)
+    
+            eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+            # print("Eigenvalues:\n", eigenvalues)
+            # print("Eigenvectors:\n", eigenvectors)
+            hor_rms = math.sqrt(eigenvalues[0])
+            ver_rms = math.sqrt(eigenvalues[1])
+    
+            elongation_num = math.sqrt(hor_rms/ver_rms)
+    
+            # print("HERE is hor_rms: ", hor_rms)
+            # print("HERE is ver_rms: ", ver_rms)
+            # print("HERE is elong: ", elongation_num)
+    
+            return hor_rms, ver_rms, elongation_num  
+
+    def is_line(self, hor_rms, elongation_num):
+        if hor_rms >= self.hor_rms_threshold:
+            return True
+        
+        if elongation_num <= self.elongation_num_threshold:
+            return True
+
+        return False
+         
+        
+
     #-------Helper funcs and pub------
 
     def cloud_to_xyz(self, msg):
@@ -316,13 +352,21 @@ class TreeFinder:
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
 
         cluster_cloud = self.make_pointcloud2_xyz32(header, self.publish_list)
+        #take out zero rows with bool mask
+        #get the two candrees columns of xmean,ymean that are leftover
 
-        beacons = self.make_pointcloud2_xyz32(header, self.centroid_list)
+        all_e_arrays = np.vstack(self.cand_trees)
+
+        const_z_col = np.full((all_e_arrays.shape[0], 1), 1.67)
+
+        all_points = np.column_stack((all_e_arrays[:, 4:6], all_e_arrays[:, 3]))
+        beacons = self.make_pointcloud2_xyz32(header, all_points)
 
 
         self.pub_cloud.publish(cluster_cloud)
 
         self.pub_beacon.publish(beacons)
+
         self.publish_list = [[1000000000,10000000000,100000000000]]
     
 
