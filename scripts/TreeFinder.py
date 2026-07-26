@@ -52,7 +52,7 @@ class TreeFinder:
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
 
-        self.debug_plot  = rospy.get_param("~debug_plot", True)
+        self.debug_plot  = rospy.get_param("~debug_plot", False)
         self.plot_period = rospy.get_param("~plot_period", 2.0)   # seconds
         self.plot_dir    = os.path.expanduser(
             rospy.get_param("~plot_dir", "~/ishb_ws/debug_plots"))
@@ -67,13 +67,13 @@ class TreeFinder:
         self.last_plot = None
         self.processed_cloud_list = []
 
-        self.publish_list = deque(maxlen =self.pancake_stacks  )
+        self.publish_list = deque(maxlen =self.pancake_stacks*1)
 
         #Tree Confirmation Parameters
 
         #Step 1: Is Line
-        self.hor_rms_threshold = 0.8 #Measure of how spread horizontally
-        self.elongation_num_threshold = 0.2 #ranges 0-1, higher is more "circular"
+        self.hor_rms_threshold = 0.15 #Measure of how spread horizontally
+        self.elongation_num_threshold = .5 #ranges 0-1, higher is more "circular"
         
 
 
@@ -148,34 +148,32 @@ class TreeFinder:
             if len(processed_cloud):
                 labels, n_clusters = self.clustering(processed_cloud, which)
 
-            self.centroid_list = np.zeros((n_clusters-1,3))
+            # self.centroid_list = np.zeros((n_clusters-1,3))
+            if n_clusters > 0:
+                e_array = np.zeros((n_clusters-1, 6))
 
-            e_array = np.zeros((n_clusters-1, 6))
+                for clustnum in range(n_clusters-1):
+                    curr_clust = self.xy[labels == clustnum]
+                    xmean = np.mean(curr_clust[:,0])
+                    ymean = np.mean(curr_clust[:,1])
 
-            for clustnum in range(n_clusters-1):
-                curr_clust = self.xy[labels == clustnum]
-                xmean = np.mean(curr_clust[:,0])
-                ymean = np.mean(curr_clust[:,1])
+                    #Getting relevant cluster info from eigen func
+                    hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
 
-                #Getting relevant cluster info from eigen func
-                hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
+                    if not self.is_line(hor_rms, elongation_num):
+                        #TODO centriod list artifact?
+                        # self.centroid_list[clustnum,0] = xmean
+                        # self.centroid_list[clustnum,1] = ymean
+                        # self.centroid_list[clustnum,2] = 1.67
+                        # print("HERE is self.centriod_list: ", self.centroid_list)
 
-                if not self.is_line(hor_rms, elongation_num):
-                    #TODO centriod list artifact?
-                    self.centroid_list[clustnum,0] = xmean
-                    self.centroid_list[clustnum,1] = ymean
-                    self.centroid_list[clustnum,2] = 1.67
-                    # print("HERE is self.centriod_list: ", self.centroid_list)
+                        #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
+                        e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
 
-                    #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
-                    e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
-
-                    # print("HER is e_array shape: ", e_array.shape)
-                #TODO if else statement for returned value for is big func
-                
-
-
-            return e_array
+                        # print("HER is e_array shape: ", e_array.shape)
+                    #TODO if else statement for returned value for is big func
+                return e_array
+            return None
 
     def clustering(self, points, which): 
         
@@ -283,11 +281,12 @@ class TreeFinder:
             eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
             # print("Eigenvalues:\n", eigenvalues)
             # print("Eigenvectors:\n", eigenvectors)
-            hor_rms = math.sqrt(eigenvalues[0])
-            ver_rms = math.sqrt(eigenvalues[1])
-    
-            elongation_num = math.sqrt(hor_rms/ver_rms)
-    
+            hor_rms = math.sqrt(abs(eigenvalues[0]))
+            ver_rms = math.sqrt(abs(eigenvalues[1]))
+            if ver_rms != 0:
+                elongation_num = math.sqrt(hor_rms/ver_rms)
+            else:
+                elongation_num = 0
             # print("HERE is hor_rms: ", hor_rms)
             # print("HERE is ver_rms: ", ver_rms)
             # print("HERE is elong: ", elongation_num)
@@ -352,7 +351,7 @@ class TreeFinder:
     def publ(self):
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
 
-        print("HERE IS publish_list: ", self.publish_list)
+        # print("HERE IS publish_list: ", self.publish_list)
         stacked_pub_list = np.vstack(self.publish_list)
         cluster_cloud = self.make_pointcloud2_xyz32(header, stacked_pub_list)
         #take out zero rows with bool mask
