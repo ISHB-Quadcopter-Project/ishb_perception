@@ -57,7 +57,7 @@ class TreeFinder:
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
 
-        self.debug_plot  = rospy.get_param("~debug_plot", True)
+        self.debug_plot  = rospy.get_param("~debug_plot", False)
         self.plot_period = rospy.get_param("~plot_period", 2.0)   # seconds
         self.plot_dir    = os.path.expanduser(
             rospy.get_param("~plot_dir", "~/ishb_ws/debug_plots"))
@@ -72,7 +72,7 @@ class TreeFinder:
         self.last_plot = None
         self.processed_cloud_list = []
 
-        self.publish_list = []
+        self.publish_list = [[1000000000,10000000000,100000000000]]
 
         
 
@@ -122,18 +122,14 @@ class TreeFinder:
         #Below is for rviz publishing
         #Return cut_cloud with indices that only include uniqe x,y's
         # print("HERE is shape not_includez: : ", np.shape(cut_cloud[first,0:2]))
-        # self.publish_list.append(cut_cloud[first]) #TODO publish stuff
+        # self.publish_list.append(cut_cloud[first])
+        self.publish_list = np.append(self.publish_list,cut_cloud[first],axis = 0)
+        # print(self.publish_list)
 
         
 
-        # print("publish list size: asdfasdfasdfasdf",np.shape(self.publish_list))
-        # print("cut cloud shape asdfasfasfasdfasdf " , np.shape(cut_cloud[first])
-
-        #TODO maybe here, and not in callback or in self, incopeerate dict iterating dif voxel height???
-        # if(z_low == self.z_low_one):
-        #     self.cloud_section_one =cut_cloud[first]
-        # else:
-        #     self.cloud_section_two =cut_cloud[first]
+        print("publish list size: asdfasdfasdfasdf",np.shape(self.publish_list))
+        print("cut cloud shape asdfasfasfasdfasdf " , np.shape(cut_cloud[first]))
 
 
         return cut_cloud[first,0:2] 
@@ -145,9 +141,9 @@ class TreeFinder:
                     e_array = self.centroid_finder(pancake_num) #TODO pass in which and for loop maybe here, passing in "which", the index of processed_cloud_list
                     self.cand_trees[pancake_num] = e_array
             # print("HERE is self.cand_tree: ", self.cand_trees)
-            print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
+            # print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
 
-            # self.publ() #TODO publilsh stuff
+            self.publ()
         #TODO  call cluster categorizing steps 2-4 funcs here
             
 
@@ -211,9 +207,9 @@ class TreeFinder:
 
         elongation_num = math.sqrt(hor_rms/ver_rms)
 
-        print("HERE is hor_rms: ", hor_rms)
-        print("HERE is ver_rms: ", ver_rms)
-        print("HERE is elong: ", elongation_num)
+        # print("HERE is hor_rms: ", hor_rms)
+        # print("HERE is ver_rms: ", ver_rms)
+        # print("HERE is elong: ", elongation_num)
 
         return hor_rms, ver_rms, elongation_num  
 
@@ -357,15 +353,15 @@ class TreeFinder:
     def publ(self):
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
 
-        cluster_cloud = self.make_pointcloud2_xyz32(header, np.array(self.publish_list))
+        cluster_cloud = self.make_pointcloud2_xyz32(header, self.publish_list)
 
         beacons = self.make_pointcloud2_xyz32(header, self.centroid_list)
 
 
         self.pub_cloud.publish(cluster_cloud)
-        self.publish_list = []
 
         self.pub_beacon.publish(beacons)
+        self.publish_list = [[1000000000,10000000000,100000000000]]
     
 
 def main():
