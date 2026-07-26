@@ -39,12 +39,6 @@ class TreeFinder:
         self.processed_cloud_low = None 
         self.processed_cloud_high = None
         self.tree_cands = None
-
-        # self.z_low_one = round(5 * 0.067, 5)
-        # self.z_high_one = round(6 * 0.067, 5)
-
-        # self.z_low_two = round(15 * 0.067, 5)
-        # self.z_high_two = round(20 * 0.067, 5)
         
         self.pancake_stacks = 5
         self.pancake_start = round(5 * 0.067, 5)
@@ -57,7 +51,7 @@ class TreeFinder:
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
 
-        self.debug_plot  = rospy.get_param("~debug_plot", False)
+        self.debug_plot  = rospy.get_param("~debug_plot", True)
         self.plot_period = rospy.get_param("~plot_period", 2.0)   # seconds
         self.plot_dir    = os.path.expanduser(
             rospy.get_param("~plot_dir", "~/ishb_ws/debug_plots"))
@@ -90,17 +84,6 @@ class TreeFinder:
             mid_height = self.pancake_start + (self.pancake_gap * i) 
             processed_cloud = self.cut_cloud(self.latest_cloud, mid_height)
             self.processed_cloud_list.append(processed_cloud)
-            # print("HERE is pro clouod list: ", self.processed_cloud_list)
-            # print("HERE is pro clouod list len: ", len(self.processed_cloud_list))
-            
-            # # with self.lock:
-            # self.processed_cloud_low = self.cut_cloud(self.latest_cloud, self.z_low_one, self.z_high_one) 
-            # self.processed_cloud_list.append(self.processed_cloud_low)
-            # #TODO think about being able to iterate through more voxel heights
-
-            # self.processed_cloud_high = self.cut_cloud(self.latest_cloud, self.z_low_two, self.z_high_two)
-            # self.processed_cloud_list.append(self.processed_cloud_high)
-            # # print("HERE is cut for 1st z: ", self.processed_cloud)
 
     def cut_cloud(self, uncut_cloud, z_mid):
         # print("HERE is pre processed z: ", uncut_cloud[:,2])
@@ -120,18 +103,12 @@ class TreeFinder:
         _, first = np.unique(key, return_index = True) 
 
         #Below is for rviz publishing
-        #Return cut_cloud with indices that only include uniqe x,y's
-        # print("HERE is shape not_includez: : ", np.shape(cut_cloud[first,0:2]))
-        # self.publish_list.append(cut_cloud[first])
         self.publish_list = np.append(self.publish_list,cut_cloud[first],axis = 0)
-        # print(self.publish_list)
 
-        
+        # print("publish list size: asdfasdfasdfasdf",np.shape(self.publish_list))
+        # print("cut cloud shape asdfasfasfasdfasdf " , np.shape(cut_cloud[first]))
 
-        print("publish list size: asdfasdfasdfasdf",np.shape(self.publish_list))
-        print("cut cloud shape asdfasfasfasdfasdf " , np.shape(cut_cloud[first]))
-
-
+        #Return cut_cloud with indices that only include uniqe x,y's
         return cut_cloud[first,0:2] 
 
     def on_timer(self,event):
@@ -145,23 +122,8 @@ class TreeFinder:
 
             self.publ()
         #TODO  call cluster categorizing steps 2-4 funcs here
-            
 
-        #TODO artifact, and commented out pub in cu_cloud update this beta
-        # if len(self.processed_cloud_low): #and len(self.processed_cloud_high):
-        #     # self.clustering(self.processed_cloud_low, 0)
-        #     #self.clustering(self.processed_cloud_high, 1)
-        #     self.publ()    
-
-    def centroid_finder(self, which): #TODO pass in which here, and incoperate logic for it
-        # if len(self.processed_cloud_low): #and len(self.processed_cloud_high):
-        #             labels, n_clusters = self.clustering(self.processed_cloud_low, 0)
-        #             # print("labels shape ::::::::::",labels.shape)
-        #             # print("xy ::::::::::",self.xy.shape)
-        #             # print("labels == 3::::::::::",(labels == 3).shape)
-
-        #             #self.clustering(self.processed_cloud_high, 1) 
-
+    def centroid_finder(self, which):
         # print("HERE is which inside of centriod findeer: ", which)
         # print("proc cloud list length::::::::::::: " ,len(self.processed_cloud_list))
         if len(self.processed_cloud_list) > which:
@@ -171,23 +133,23 @@ class TreeFinder:
 
             self.centroid_list = np.zeros((n_clusters-1,3))
 
-            e_array = np.zeros((n_clusters-1, 6))#TODO np zeros?
+            e_array = np.zeros((n_clusters-1, 6))
 
             for clustnum in range(n_clusters-1):
                 curr_clust = self.xy[labels == clustnum]
                 xmean = np.mean(curr_clust[:,0])
                 ymean = np.mean(curr_clust[:,1])
+
+                #TODO this centriod list is used when publishing beacon
                 self.centroid_list[clustnum,0] = xmean
                 self.centroid_list[clustnum,1] = ymean
                 self.centroid_list[clustnum,2] = 1.67
                 # print("HERE is self.centriod_list: ", self.centroid_list)
 
-                #TODO call eigen, pass in curr_clust and xmean and ymean
-                hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
-                e_array[clustnum] = [hor_rms, ver_rms, elongation_num, clustnum,xmean,ymean]
+                hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean) #Getting relevant cluster info from eigen func
 
-                # np.append(e_array, np.array([hor_rms, ver_rms, elongation_num, clustnum,xmean,ymean]))
-                # e_array.append(np.array([hor_rms, ver_rms, elongation_num, clustnum,xmean,ymean]),axis = 0)
+                #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
+                e_array[clustnum] = [hor_rms, ver_rms, elongation_num, clustnum,xmean,ymean]
 
             return e_array
 
