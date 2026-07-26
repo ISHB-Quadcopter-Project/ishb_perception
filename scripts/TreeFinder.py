@@ -67,7 +67,7 @@ class TreeFinder:
         self.last_plot = None
         self.processed_cloud_list = []
 
-        self.publish_list = [[1000000000,10000000000,100000000000]]
+        self.publish_list = deque(maxlen =self.pancake_stacks  )
 
         #Tree Confirmation Parameters
 
@@ -109,7 +109,8 @@ class TreeFinder:
         _, first = np.unique(key, return_index = True) 
 
         #Below is for rviz publishing
-        self.publish_list = np.append(self.publish_list,cut_cloud[first],axis = 0)
+        # self.publish_list = np.append(self.publish_list,cut_cloud[first],axis = 0)
+        self.publish_list.append(cut_cloud[first])
 
         # print("publish list size: asdfasdfasdfasdf",np.shape(self.publish_list))
         # print("cut cloud shape asdfasfasfasdfasdf " , np.shape(cut_cloud[first]))
@@ -125,16 +126,16 @@ class TreeFinder:
 
                     if e_array is not None:
                         # not_zero_mask = [e_array != (0,0,0,0,0,0)]
-                        print("EARRAY: ", e_array)
-                        print("EARRAY shape: ", e_array.shape)
+                        # print("EARRAY: ", e_array)
+                        # print("EARRAY shape: ", e_array.shape)
 
                         not_zero_mask = np.any(e_array != 0, axis =1)
-                        print("HERE IS not zero mask: ", not_zero_mask)
+                        # print("HERE IS not zero mask: ", not_zero_mask)
                         cleaned_e_array = e_array[not_zero_mask]
 
                         self.cand_trees[pancake_num] = cleaned_e_array
-            print("HERE is self.cand_tree: ", self.cand_trees)
-            print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
+            # print("HERE is self.cand_tree: ", self.cand_trees)
+            # print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
             
             self.publ()
         #TODO  call cluster categorizing steps 2-4 funcs here
@@ -351,7 +352,9 @@ class TreeFinder:
     def publ(self):
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
 
-        cluster_cloud = self.make_pointcloud2_xyz32(header, self.publish_list)
+        print("HERE IS publish_list: ", self.publish_list)
+        stacked_pub_list = np.vstack(self.publish_list)
+        cluster_cloud = self.make_pointcloud2_xyz32(header, stacked_pub_list)
         #take out zero rows with bool mask
         #get the two candrees columns of xmean,ymean that are leftover
 
@@ -367,7 +370,6 @@ class TreeFinder:
 
         self.pub_beacon.publish(beacons)
 
-        self.publish_list = [[1000000000,10000000000,100000000000]]
     
 
 def main():
