@@ -16,6 +16,8 @@ from collections import deque, defaultdict
 from sklearn.neighbors import KDTree
 from sklearn.decomposition import PCA
 
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
 
 
 
@@ -31,6 +33,8 @@ class TreeFinder:
         self.pub_beacon = rospy.Publisher("/Beacons", PointCloud2, queue_size = 10)
 
         self.pub_cloud = rospy.Publisher("/Z_CLUSTERS", PointCloud2, queue_size = 10)
+
+        self.pub_line = rospy.Publisher("LINES", PointCloud2, queue_size = 10)
 
         #Sub to cum cloud
         self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
@@ -74,6 +78,8 @@ class TreeFinder:
         self.mid_z_dict = defaultdict(dict) #Stores relevant info for mid z slice clusters: cluster, num pts in cluster, centriod
         self.mid_n_clusters = 0
         self.clustered_cloud_list = []
+        self.all_vpancakes = None
+        self.pub_line_list= []
 
 
         #TODO OLD STUFF: Tree Confirmation Parameters
@@ -366,12 +372,12 @@ class TreeFinder:
             #V stacks all pancakes verically, to give KDtree all points from all pancakes
 
             # print("HERE is all_pancakes: ", all_pancakes)
-            all_vpancakes = np.vstack(all_pancakes)
+            self.all_vpancakes = np.vstack(all_pancakes)
             
 
             if n_clusters > 0 and len(self.mid_z_dict):
                 for i in range(n_clusters-1):
-                    tree = KDTree(all_vpancakes, leaf_size =40)
+                    tree = KDTree(self.all_vpancakes, leaf_size =40)
                     clust_name = f"Cluster {i}"
 
                     # print("HERe is n_clusters: ", n_clusters)
@@ -386,7 +392,7 @@ class TreeFinder:
                     print("HERE is num_pts for clust looking at rn: ", self.mid_z_dict[clust_name]["num_pts"])
                     dist, ind = tree.query(centriod.reshape(1,-1), k = self.mid_z_dict[clust_name]["num_pts"]*3)
 
-                    neighbors = all_vpancakes[ind[0]]
+                    neighbors = self.all_vpancakes[ind[0]]
 
                     # print("HERE is neighbors: ", neighbors)
                     # print("HERE is neighbors shape: ", neighbors.shape)
@@ -394,10 +400,27 @@ class TreeFinder:
                     centered_neighbors = neighbors - centriod
                     pca = PCA(n_components=3)
                     fitted = pca.fit(centered_neighbors)
-                    print("HERE is pca axis's: ", fitted.components_)
 
+                    fitted_comps = pca.components_
+                    # biggest_eig = max(pca.com)
+                    self.PCA_make_lines(fitted_comps[0],centriod)
 
+                    # self.PCA_zaxis_list.append(fitted_comps[0] + centriod)
+                    print("HERE is pca axis's: ", fitted_comps)
 
+    def PCA_make_lines(self, z_axis,centroid):
+        z_axis = abs(z_axis)
+        z_basis = z_axis / np.linalg.norm(z_axis)
+
+        length = 10
+        line = np.linspace(0,length,20)[:,np.newaxis]
+        print("line shape: ", line.shape)
+        print("line: ", line)
+        print("line z_basis: ", z_basis)
+
+        curr_line = line * z_basis + centroid
+        # print("HERE is curr_line: ", curr_line)
+        self.pub_line_list.append(curr_line)
 
 
 
@@ -453,25 +476,57 @@ class TreeFinder:
 
     def publ(self):#TODO publish the PCA z-axis???
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
+        if len(self.all_vpancakes):
+            #TODO uncomment and fix the can't concatinate error
+            # print("HERE IS publish_list: ", self.publish_list)
+            # stacked_pub_list = np.vstack(self.publish_list)
+            cluster_cloud = self.make_pointcloud2_xyz32(header, self.all_vpancakes)
+            self.pub_cloud.publish(cluster_cloud)
 
-        #TODO uncomment and fix the can't concatinate error
-        # print("HERE IS publish_list: ", self.publish_list)
-        # stacked_pub_list = np.vstack(self.publish_list)
-        # cluster_cloud = self.make_pointcloud2_xyz32(header, stacked_pub_list)
-        #take out zero rows with bool mask
-        #get the two candrees columns of xmean,ymean that are leftover
+        if len(self.pub_line_list):
+            line_stacked = np.vstack(self.pub_line_list)
+            line_cloud = self.make_pointcloud2_xyz32(header, line_stacked)
+            self.pub_line.publish(line_cloud)
+        # if len(self.PCA_zaxis_list):
+        #     marker = Marker()
+        #     marker.header.frame_id = "world"
+        #     marker.header.stamp = rospy.Time.now()
+        #     marker.ns = "lines"
+        #     marker.id = 0
+        #     marker.type = Marker.LINE_LIST
+        #     marker.action = Marker.ADD
 
-        # all_e_arrays = np.vstack(self.cand_trees)
+        #     # Line width
+        #     marker.scale.x = 0.05 
 
-        # const_z_col = np.full((all_e_arrays.shape[0], 1), 1.67)
+        #     # Color (Red, fully opaque)
+        #     marker.color.r = 1.0
+        #     marker.color.g = 0.0
+        #     marker.color.b = 0.0
+        #     marker.color.a = 1.0
 
-        # all_points = np.column_stack((all_e_arrays[:, 4:6], all_e_arrays[:, 3]))
-        # beacons = self.make_pointcloud2_xyz32(header, all_points)
+        #     point_list = []
+        #     for z_axis in self.PCA_zaxis_list:
+        #         x = z_axis[0]
+        #         y = z_axis[1]
+        #         z = z_axis[2]
 
+        #         p = Point(x=x, y=y, z=z)
 
-        # self.pub_cloud.publish(cluster_cloud)
+        #         point_list.append(p)
 
-        # self.pub_beacon.publish(beacons)
+        #     marker.points = point_list
+
+        #     self.pub_line.publish(marker)
+
+    
+        # if len(self.cand_trees):
+        #     all_e_arrays = np.vstack(self.cand_trees)
+
+        #     all_points = np.column_stack((all_e_arrays[:, 4:6], all_e_arrays[:, 3]))
+        #     beacons = self.make_pointcloud2_xyz32(header, all_points)
+
+        #     self.pub_beacon.publish(beacons)
 
     
 
