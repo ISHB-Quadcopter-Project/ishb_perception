@@ -46,8 +46,8 @@ class TreeFinder:
 
         self.latest_cloud = None
         
-        self.pancake_stacks = 3
-        self.pancake_start = round(5 * 0.067, 5)
+        self.pancake_stacks = 7
+        self.pancake_start = round(5 * 0.067, 5)  #5 before
         self.pancake_gap = round(1 * 0.067, 5) #TODO This has to be small for new alg
         self.pancake_thickness = round(1 * 0.067, 5)
         self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
@@ -80,6 +80,7 @@ class TreeFinder:
         self.clustered_cloud_list = []
         self.all_vpancakes = None
         self.pub_line_list= []
+        self.leaf_size = 80
 
 
         #TODO OLD STUFF: Tree Confirmation Parameters
@@ -135,9 +136,9 @@ class TreeFinder:
         i = 1
         with self.lock:
             if len(self.processed_cloud_list):
+                mid_num = round(self.pancake_stacks / 2)
                 for pancake_num in range(self.pancake_stacks):
                     is_mid = False
-                    mid_num = round(self.pancake_stacks / i)
                     # print("HERE is mid_num: ", mid_num)
 
                     if i == mid_num: #Checking if at the mid z-slice
@@ -377,7 +378,7 @@ class TreeFinder:
 
             if n_clusters > 0 and len(self.mid_z_dict):
                 for i in range(n_clusters-1):
-                    tree = KDTree(self.all_vpancakes, leaf_size =40)
+                    tree = KDTree(self.all_vpancakes, leaf_size =self.leaf_size)
                     clust_name = f"Cluster {i}"
 
                     # print("HERe is n_clusters: ", n_clusters)
@@ -390,7 +391,7 @@ class TreeFinder:
                     # print("HERE is vpanackes shape: ", all_vpancakes.shape)
 
                     # print("HERE is num_pts for clust looking at rn: ", self.mid_z_dict[clust_name]["num_pts"])
-                    dist, ind = tree.query(centriod.reshape(1,-1), k = self.mid_z_dict[clust_name]["num_pts"]*3)
+                    dist, ind = tree.query(centriod.reshape(1,-1), k = self.mid_z_dict[clust_name]["num_pts"]*self.pancake_stacks)
 
                     neighbors = self.all_vpancakes[ind[0]]
 
