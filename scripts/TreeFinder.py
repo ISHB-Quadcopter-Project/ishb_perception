@@ -12,7 +12,10 @@ from sklearn.cluster import DBSCAN
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from collections import deque 
+from collections import deque, defaultdict
+from sklearn.neighbors import KDTree
+from sklearn.decomposition import PCA
+
 
 
 
@@ -38,21 +41,19 @@ class TreeFinder:
         rospy.Timer(rospy.Duration(0.1), self.on_timer)  # 10 Hz
 
         self.latest_cloud = None
-        self.processed_cloud_low = None 
-        self.processed_cloud_high = None
         
-        self.pancake_stacks = 5
+        self.pancake_stacks = 3
         self.pancake_start = round(5 * 0.067, 5)
-        self.pancake_gap = round(4 * 0.067, 5)
+        self.pancake_gap = round(1 * 0.067, 5) #TODO This has to be small for new alg
         self.pancake_thickness = round(1 * 0.067, 5)
-
+        self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
         self.xy = None
         self.centroid_list = None
 
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
 
-        self.debug_plot  = rospy.get_param("~debug_plot", False)
+        self.debug_plot  = rospy.get_param("~debug_plot", True)
         self.plot_period = rospy.get_param("~plot_period", 2.0)   # seconds
         self.plot_dir    = os.path.expanduser(
             rospy.get_param("~plot_dir", "~/ishb_ws/debug_plots"))
@@ -69,7 +70,13 @@ class TreeFinder:
 
         self.publish_list = deque(maxlen =self.pancake_stacks*1)
 
-        #Tree Confirmation Parameters
+        #------New alg---------
+        self.mid_z_dict = defaultdict(dict) #Stores relevant info for mid z slice clusters: cluster, num pts in cluster, centriod
+        self.mid_n_clusters = 0
+        self.clustered_cloud_list = []
+
+
+        #TODO OLD STUFF: Tree Confirmation Parameters
 
         #Step 1: Is Line
         self.hor_rms_threshold = 0.15 #Measure of how spread horizontally
@@ -87,8 +94,8 @@ class TreeFinder:
         self.processed_cloud_list.clear()
 
         for i in range(self.pancake_stacks):
-            mid_height = self.pancake_start + (self.pancake_gap * i) 
-            processed_cloud = self.cut_cloud(self.latest_cloud, mid_height)
+            cur_mid_height = self.pancake_start + (self.pancake_gap * i)  #Middle height of cur pancake looking at
+            processed_cloud = self.cut_cloud(self.latest_cloud, cur_mid_height)
             self.processed_cloud_list.append(processed_cloud)
 
     def cut_cloud(self, uncut_cloud, z_mid):
@@ -119,10 +126,19 @@ class TreeFinder:
         return cut_cloud[first,0:2] 
 
     def on_timer(self,event):
+        i = 1
         with self.lock:
             if len(self.processed_cloud_list):
                 for pancake_num in range(self.pancake_stacks):
-                    e_array = self.centroid_finder(pancake_num) #TODO pass in which and for loop maybe here, passing in "which", the index of processed_cloud_list
+                    is_mid = False
+                    mid_num = round(self.pancake_stacks / i)
+                    # print("HERE is mid_num: ", mid_num)
+
+                    if i == mid_num: #Checking if at the mid z-slice
+                        is_mid = True
+
+                    self.mid_z_dict.clear()#Clear dict for mid slice, before poulate again with new clustering
+                    e_array = self.centroid_finder(pancake_num, is_mid) #TODO pass another param here ditate whether at mid cluster, so execute dif logis in centriod_finder
 
                     if e_array is not None:
                         # not_zero_mask = [e_array != (0,0,0,0,0,0)]
@@ -134,13 +150,20 @@ class TreeFinder:
                         cleaned_e_array = e_array[not_zero_mask]
 
                         self.cand_trees[pancake_num] = cleaned_e_array
+
+                    i += 1
+
+                
+                    
+
+                        #TODO somehwere in on_timer, need to call func for kd tree and PCA
             # print("HERE is self.cand_tree: ", self.cand_trees)
             # print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
             
             self.publ()
         #TODO  call cluster categorizing steps 2-4 funcs here
 
-    def centroid_finder(self, which):
+    def centroid_finder(self, which, is_mid):
         # print("HERE is which inside of centriod findeer: ", which)
         # print("proc cloud list length::::::::::::: " ,len(self.processed_cloud_list))
         if len(self.processed_cloud_list) > which:
@@ -151,6 +174,8 @@ class TreeFinder:
             # self.centroid_list = np.zeros((n_clusters-1,3))
             if n_clusters > 0:
                 e_array = np.zeros((n_clusters-1, 6))
+                self.clustered_cloud_list = self.xy[labels != -1]
+                # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
 
                 for clustnum in range(n_clusters-1):
                     curr_clust = self.xy[labels == clustnum]
@@ -159,6 +184,21 @@ class TreeFinder:
 
                     #Getting relevant cluster info from eigen func
                     hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
+
+                    #Populate mid_z_dict if at mid z-sclie
+                    if is_mid:
+                        # print("HERE is curr_clsut: ", curr_clust)
+                        num_pts = curr_clust.shape[0]
+
+                        #TODO replace this call with the filtering func
+                        # print("HERE is num of ptS: ", num_pts)
+                        clust_name = f"Cluster {clustnum}"
+                        self.mid_z_dict[clust_name]["num_pts"] = num_pts
+                        self.mid_z_dict[clust_name]["xmean"] = xmean
+                        self.mid_z_dict[clust_name]["ymean"] = ymean
+
+
+                        # print("HERE is mid_z_dict: ", self.mid_z_dict)
 
                     if not self.is_line(hor_rms, elongation_num):
                         #TODO centriod list artifact?
@@ -172,6 +212,7 @@ class TreeFinder:
 
                         # print("HER is e_array shape: ", e_array.shape)
                     #TODO if else statement for returned value for is big func
+                self.kd_tree(n_clusters) #Call #TODO filtering func, after for loop so dict is fully populated
                 return e_array
             return None
 
@@ -302,72 +343,135 @@ class TreeFinder:
 
         return False
          
-        
+
+    #--------New alg funcs--------
+    #TODO KDtree. This will access elements from mid-z-slice dict. Outputs numpy arrays for the 3D assoicated clusters for potential trees.
+    #Use processed cloud llist, to access all the "pancakes"
+    def kd_tree(self, n_clusters):
+        if len(self.clustered_cloud_list):
+            # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
+            # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
+            all_pancakes = []
+            for i in range(self.pancake_stacks):
+                curr_z = self.pancake_start + (self.pancake_gap * i)
+                num_rows = np.shape(self.clustered_cloud_list)[0] 
+                z_array = np.ones((num_rows,1)) * curr_z
+                # print("z_array: ", z_array)
+                # print("z_array shape: ", z_array.shape)
+                all_pancakes.append(np.append(self.clustered_cloud_list,z_array,axis = 1))
+                # TODO can optimize heavily if you just append xyz  of fullxyz[label boolean mask] instead of saving lists of x, y, then vstacking , do late r later
+
+                # print("HERE is all_panacakes: ", all_pancakes)
+
+            #V stacks all pancakes verically, to give KDtree all points from all pancakes
+
+            # print("HERE is all_pancakes: ", all_pancakes)
+            all_vpancakes = np.vstack(all_pancakes)
+            
+
+            if n_clusters > 0 and len(self.mid_z_dict):
+                for i in range(n_clusters-1):
+                    tree = KDTree(all_vpancakes, leaf_size =40)
+                    clust_name = f"Cluster {i}"
+
+                    # print("HERe is n_clusters: ", n_clusters)
+                    # print("HERE is clust_name: ", clust_name)
+                    # print("HERE is z_mid_dict: ", self.mid_z_dict)
+                    centriod = np.array([self.mid_z_dict[clust_name]["xmean"], self.mid_z_dict[clust_name]["ymean"], self.mid_height]) #self.mid_height is a const in init
+
+                    # print("HERE is CENTRIOD: ", centriod)
+                    # print("HERE is vpanackes: ", all_vpancakes)
+                    # print("HERE is vpanackes shape: ", all_vpancakes.shape)
+
+                    print("HERE is num_pts for clust looking at rn: ", self.mid_z_dict[clust_name]["num_pts"])
+                    dist, ind = tree.query(centriod.reshape(1,-1), k = self.mid_z_dict[clust_name]["num_pts"]*3)
+
+                    neighbors = all_vpancakes[ind[0]]
+
+                    # print("HERE is neighbors: ", neighbors)
+                    # print("HERE is neighbors shape: ", neighbors.shape)
+                    # print("\n")
+                    centered_neighbors = neighbors - centriod
+                    pca = PCA(n_components=3)
+                    fitted = pca.fit(centered_neighbors)
+                    print("HERE is pca axis's: ", fitted.components_)
+
+
+
+
+
+
+    #TODO PCA func. This will take in the numpy array of potential tree 3D clustered pts from KDtree.
+    #Does PCA anayze on said array. Then, will incoperate logic to discern whether the z PCA axis for each potential tree is valid (near vertical)
+
+    #TODO Filtering func. This will call PCA func, take the outputed numpy array (either reutnr of make global idk yet), and pass into PCA func. This willl then
+    #take the poential trees PCA said aren't trees, and filter the cand_trees (or make a new list) accordingly
 
     #-------Helper funcs and pub------
 
     def cloud_to_xyz(self, msg):
-            # For FAST-LIO's /cloud_registered: x,y,z are float32 at offsets 0,4,8
-    
-            #defining the type of the datanp.dyte('name of this field', 'type of field', 'how many bits this part takes')
-            #here, four fields fields can be stacked to be define the fields of incoming PointCloud2 message
-            dtype = np.dtype([     
-                ('x', np.float32), ('y', np.float32), ('z', np.float32),
-                ('_pad', np.uint8, msg.point_step - 12)
-            ])
-            #contiguous array not needed, as not turning numpy-> binary blob, its just binary blob parsed into binary blob
-            #
-            arr = np.frombuffer(msg.data, dtype=dtype, count=msg.width * msg.height)
-            # the buffer is the the data being locked, and what threads write to, its a sort of temp memory(doesnt need to be locked, we have our own version of msg due to callback writing to self.something)
-            # frombuffer reads data without copying it, treating it as a 1d array, and keeping only(in this case)
-            # reads msg.data in the thread, interprets as .data, which is a Pointcloud2 message, dtype recreating our version of the Pointcloud2 message format, 
-            # with the size of the buffer being read as the size of the whole pointcloud
-            # (how many points there are in the pointcloud, given by msg.heigh/width, parameters of passed message)
-            return np.column_stack((arr['x'], arr['y'], arr['z']))
+        # For FAST-LIO's /cloud_registered: x,y,z are float32 at offsets 0,4,8
+
+        #defining the type of the datanp.dyte('name of this field', 'type of field', 'how many bits this part takes')
+        #here, four fields fields can be stacked to be define the fields of incoming PointCloud2 message
+        dtype = np.dtype([     
+            ('x', np.float32), ('y', np.float32), ('z', np.float32),
+            ('_pad', np.uint8, msg.point_step - 12)
+        ])
+        #contiguous array not needed, as not turning numpy-> binary blob, its just binary blob parsed into binary blob
+        #
+        arr = np.frombuffer(msg.data, dtype=dtype, count=msg.width * msg.height)
+        # the buffer is the the data being locked, and what threads write to, its a sort of temp memory(doesnt need to be locked, we have our own version of msg due to callback writing to self.something)
+        # frombuffer reads data without copying it, treating it as a 1d array, and keeping only(in this case)
+        # reads msg.data in the thread, interprets as .data, which is a Pointcloud2 message, dtype recreating our version of the Pointcloud2 message format, 
+        # with the size of the buffer being read as the size of the whole pointcloud
+        # (how many points there are in the pointcloud, given by msg.heigh/width, parameters of passed message)
+        return np.column_stack((arr['x'], arr['y'], arr['z']))
 
     def make_pointcloud2_xyz32(self, header, points):
-            """Build an XYZ32 PointCloud2 via one tobytes() instead of a Python
-            per-point pack loop (which is what create_cloud_xyz32 does internally)."""
-            #because you are reinterpreting numpy arrays, point_cloud2 namespace message fields use raw bytes for information with a very specific formation, and 
-            #msg.data = points.tobytes() is used, turning it into a contiguous array 
-            #protects the information and dfines the type of each array value before turning it back
-            points = np.ascontiguousarray(points, dtype=np.float32)  # (N,3), row-major x,y,z
-            msg = PointCloud2()
-            msg.header = header
-            msg.height = 1 #height 1, being an unorganized point cloud
-            msg.width = points.shape[0] # width is just how many points there are 
-            msg.fields = [
-                PointField('x', 0, PointField.FLOAT32, 1),
-                PointField('y', 4, PointField.FLOAT32, 1),
-                PointField('z', 8, PointField.FLOAT32, 1),
-            ]
-            msg.is_bigendian = False
-            msg.point_step = 12
-            msg.row_step = 12 * points.shape[0]
-            msg.is_dense = True
-            msg.data = points.tobytes()
-            return msg     
+        """Build an XYZ32 PointCloud2 via one tobytes() instead of a Python
+        per-point pack loop (which is what create_cloud_xyz32 does internally)."""
+        #because you are reinterpreting numpy arrays, point_cloud2 namespace message fields use raw bytes for information with a very specific formation, and 
+        #msg.data = points.tobytes() is used, turning it into a contiguous array 
+        #protects the information and dfines the type of each array value before turning it back
+        points = np.ascontiguousarray(points, dtype=np.float32)  # (N,3), row-major x,y,z
+        msg = PointCloud2()
+        msg.header = header
+        msg.height = 1 #height 1, being an unorganized point cloud
+        msg.width = points.shape[0] # width is just how many points there are 
+        msg.fields = [
+            PointField('x', 0, PointField.FLOAT32, 1),
+            PointField('y', 4, PointField.FLOAT32, 1),
+            PointField('z', 8, PointField.FLOAT32, 1),
+        ]
+        msg.is_bigendian = False
+        msg.point_step = 12
+        msg.row_step = 12 * points.shape[0]
+        msg.is_dense = True
+        msg.data = points.tobytes()
+        return msg     
 
-    def publ(self):
+    def publ(self):#TODO publish the PCA z-axis???
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
 
+        #TODO uncomment and fix the can't concatinate error
         # print("HERE IS publish_list: ", self.publish_list)
-        stacked_pub_list = np.vstack(self.publish_list)
-        cluster_cloud = self.make_pointcloud2_xyz32(header, stacked_pub_list)
+        # stacked_pub_list = np.vstack(self.publish_list)
+        # cluster_cloud = self.make_pointcloud2_xyz32(header, stacked_pub_list)
         #take out zero rows with bool mask
         #get the two candrees columns of xmean,ymean that are leftover
 
-        all_e_arrays = np.vstack(self.cand_trees)
+        # all_e_arrays = np.vstack(self.cand_trees)
 
-        const_z_col = np.full((all_e_arrays.shape[0], 1), 1.67)
+        # const_z_col = np.full((all_e_arrays.shape[0], 1), 1.67)
 
-        all_points = np.column_stack((all_e_arrays[:, 4:6], all_e_arrays[:, 3]))
-        beacons = self.make_pointcloud2_xyz32(header, all_points)
+        # all_points = np.column_stack((all_e_arrays[:, 4:6], all_e_arrays[:, 3]))
+        # beacons = self.make_pointcloud2_xyz32(header, all_points)
 
 
-        self.pub_cloud.publish(cluster_cloud)
+        # self.pub_cloud.publish(cluster_cloud)
 
-        self.pub_beacon.publish(beacons)
+        # self.pub_beacon.publish(beacons)
 
     
 
