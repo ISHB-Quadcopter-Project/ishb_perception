@@ -57,7 +57,7 @@ class TreeFinder:
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
 
-        self.debug_plot  = rospy.get_param("~debug_plot", True)
+        self.debug_plot  = rospy.get_param("~debug_plot", False)
         self.plot_period = rospy.get_param("~plot_period", 2.0)   # seconds
         self.plot_dir    = os.path.expanduser(
             rospy.get_param("~plot_dir", "~/ishb_ws/debug_plots"))
@@ -164,9 +164,9 @@ class TreeFinder:
 
                         #TODO somehwere in on_timer, need to call func for kd tree and PCA
             # print("HERE is self.cand_tree: ", self.cand_trees)
-            # print("HERE is self.cand_tree shape: ", self.cand_trees.shape)
-            
+            # print("HERE is self.cand_tree shape: ", self.cand_trees.shape
             self.publ()
+            self.pub_line_list.clear()
         #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
@@ -218,7 +218,7 @@ class TreeFinder:
 
                         # print("HER is e_array shape: ", e_array.shape)
                     #TODO if else statement for returned value for is big func
-                self.kd_tree(n_clusters) #Call #TODO filtering func, after for loop so dict is fully populated
+                self.kd_tree_PCA(n_clusters) #Call #TODO filtering func, after for loop so dict is fully populated
                 return e_array
             return None
 
@@ -353,7 +353,7 @@ class TreeFinder:
     #--------New alg funcs--------
     #TODO KDtree. This will access elements from mid-z-slice dict. Outputs numpy arrays for the 3D assoicated clusters for potential trees.
     #Use processed cloud llist, to access all the "pancakes"
-    def kd_tree(self, n_clusters):
+    def kd_tree_PCA(self, n_clusters):
         if len(self.clustered_cloud_list):
             # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
             # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
@@ -389,7 +389,7 @@ class TreeFinder:
                     # print("HERE is vpanackes: ", all_vpancakes)
                     # print("HERE is vpanackes shape: ", all_vpancakes.shape)
 
-                    print("HERE is num_pts for clust looking at rn: ", self.mid_z_dict[clust_name]["num_pts"])
+                    # print("HERE is num_pts for clust looking at rn: ", self.mid_z_dict[clust_name]["num_pts"])
                     dist, ind = tree.query(centriod.reshape(1,-1), k = self.mid_z_dict[clust_name]["num_pts"]*3)
 
                     neighbors = self.all_vpancakes[ind[0]]
@@ -401,12 +401,25 @@ class TreeFinder:
                     pca = PCA(n_components=3)
                     fitted = pca.fit(centered_neighbors)
 
-                    fitted_comps = pca.components_
-                    # biggest_eig = max(pca.com)
-                    self.PCA_make_lines(fitted_comps[0],centriod)
+                    fitted_comps = np.abs(fitted.components_)
+                    # print("Here is the PCA comps: ", fitted_comps)
+
+                    all_z = fitted_comps[:, 2]
+                    max_z_index = np.argmax(all_z)
+
+                    z_eig = fitted_comps[max_z_index]
+
+                    # print("HERE is max_z_index: ", max_z_index)
+                    # print("HERE is z_eig: ", z_eig, "\n")
+                    self.PCA_make_lines(z_eig, centriod)
+
+                    # for eig_vec in fitted_comps:
+                    #     if eig_vec[2] != 
+                    #         print("EIG VEC: ", eig_vec)
+                    #         self.PCA_make_lines(eig_vec,centriod)
 
                     # self.PCA_zaxis_list.append(fitted_comps[0] + centriod)
-                    print("HERE is pca axis's: ", fitted_comps)
+                    # print("HERE is pca axis's: ", fitted_comps)
 
     def PCA_make_lines(self, z_axis,centroid):
         z_axis = abs(z_axis)
@@ -414,18 +427,18 @@ class TreeFinder:
 
         length = 10
         line = np.linspace(0,length,20)[:,np.newaxis]
-        print("line shape: ", line.shape)
-        print("line: ", line)
-        print("line z_basis: ", z_basis)
+        # print("line shape: ", line.shape)
+        # print("line: ", line)
+        # print("line z_basis: ", z_basis)
 
         curr_line = line * z_basis + centroid
         # print("HERE is curr_line: ", curr_line)
         self.pub_line_list.append(curr_line)
+        # print("HERE is pub line list")
 
 
 
-    #TODO PCA func. This will take in the numpy array of potential tree 3D clustered pts from KDtree.
-    #Does PCA anayze on said array. Then, will incoperate logic to discern whether the z PCA axis for each potential tree is valid (near vertical)
+  
 
     #TODO Filtering func. This will call PCA func, take the outputed numpy array (either reutnr of make global idk yet), and pass into PCA func. This willl then
     #take the poential trees PCA said aren't trees, and filter the cand_trees (or make a new list) accordingly
@@ -476,14 +489,15 @@ class TreeFinder:
 
     def publ(self):#TODO publish the PCA z-axis???
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
-        if len(self.all_vpancakes):
+        if self.all_vpancakes.any() != None:
             #TODO uncomment and fix the can't concatinate error
             # print("HERE IS publish_list: ", self.publish_list)
             # stacked_pub_list = np.vstack(self.publish_list)
             cluster_cloud = self.make_pointcloud2_xyz32(header, self.all_vpancakes)
             self.pub_cloud.publish(cluster_cloud)
-
+        # print("Before if state here the pub linke ist: ", self.pub_line_list)
         if len(self.pub_line_list):
+            # print("HERE is self.pub_line_list: ", self.pub_line_list)
             line_stacked = np.vstack(self.pub_line_list)
             line_cloud = self.make_pointcloud2_xyz32(header, line_stacked)
             self.pub_line.publish(line_cloud)
