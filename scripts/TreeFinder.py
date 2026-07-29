@@ -86,8 +86,8 @@ class TreeFinder:
         #TODO OLD STUFF: Tree Confirmation Parameters
 
         #Step 1: Is Line
-        self.hor_rms_threshold = 0.15 #Measure of how spread horizontally
-        self.elongation_num_threshold = .5 #ranges 0-1, higher is more "circular"
+        self.hor_rms_threshold = 0.8 #Measure of how spread horizontally
+        self.elongation_num_threshold = 1 #ranges 0-1, higher is more "circular"
         
 
 
@@ -173,6 +173,7 @@ class TreeFinder:
     def centroid_finder(self, which, is_mid):
         # print("HERE is which inside of centriod findeer: ", which)
         # print("proc cloud list length::::::::::::: " ,len(self.processed_cloud_list))
+        count = 0
         if len(self.processed_cloud_list) > which:
             processed_cloud = self.processed_cloud_list[which]
             if len(processed_cloud):
@@ -193,33 +194,33 @@ class TreeFinder:
                     hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
 
                     #Populate mid_z_dict if at mid z-sclie
-                    if is_mid:
+                    if is_mid and not self.is_line(hor_rms, elongation_num):
                         # print("HERE is curr_clsut: ", curr_clust)
                         num_pts = curr_clust.shape[0]
 
                         #TODO replace this call with the filtering func
                         # print("HERE is num of ptS: ", num_pts)
-                        clust_name = f"Cluster {clustnum}"
+                        clust_name = f"Cluster {count}"
                         self.mid_z_dict[clust_name]["num_pts"] = num_pts
                         self.mid_z_dict[clust_name]["xmean"] = xmean
                         self.mid_z_dict[clust_name]["ymean"] = ymean
 
+                        count += 1
+                    
+
+
 
                         # print("HERE is mid_z_dict: ", self.mid_z_dict)
 
-                    if not self.is_line(hor_rms, elongation_num):
-                        #TODO centriod list artifact?
-                        # self.centroid_list[clustnum,0] = xmean
-                        # self.centroid_list[clustnum,1] = ymean
-                        # self.centroid_list[clustnum,2] = 1.67
-                        # print("HERE is self.centriod_list: ", self.centroid_list)
-
-                        #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
-                        e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
+                            #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
+                            # e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
 
                         # print("HER is e_array shape: ", e_array.shape)
-                    #TODO if else statement for returned value for is big func
-                self.kd_tree_PCA(n_clusters) #Call #TODO filtering func, after for loop so dict is fully populated
+                    #TODO if else statement for returned value for is big func ARTIFACT???
+
+                #TODO
+                print("HERE is count: ", count)
+                self.kd_tree_PCA(count) #Call #TODO filtering func, after for loop so dict is fully populated
                 return e_array
             return None
 
@@ -342,10 +343,7 @@ class TreeFinder:
             return hor_rms, ver_rms, elongation_num  
 
     def is_line(self, hor_rms, elongation_num):
-        if hor_rms >= self.hor_rms_threshold:
-            return True
-        
-        if elongation_num <= self.elongation_num_threshold:
+        if hor_rms >= self.hor_rms_threshold: #or elongation_num <= self.elongation_num_threshold:
             return True
 
         return False
@@ -383,7 +381,7 @@ class TreeFinder:
 
                     # print("HERe is n_clusters: ", n_clusters)
                     # print("HERE is clust_name: ", clust_name)
-                    # print("HERE is z_mid_dict: ", self.mid_z_dict)
+                    print("HERE is z_mid_dict: ", self.mid_z_dict)
                     centriod = np.array([self.mid_z_dict[clust_name]["xmean"], self.mid_z_dict[clust_name]["ymean"], self.mid_height]) #self.mid_height is a const in init
 
                     # print("HERE is CENTRIOD: ", centriod)
