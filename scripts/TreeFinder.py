@@ -90,7 +90,7 @@ class TreeFinder:
         #TODO OLD STUFF: Tree Confirmation Parameters
 
         #Step 1: Is Line
-        self.hor_rms_threshold = 0.8 #Measure of how spread horizontally
+        self.hor_rms_threshold = 0.2 #Measure of how spread horizontally
         self.elongation_num_threshold = 1 #ranges 0-1, higher is more "circular"
         
 
@@ -200,25 +200,27 @@ class TreeFinder:
 
                     clust_name = f"Cluster {count}"
 
-                    #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
-                    self.text_dict[clust_name]["hor_rms"] = hor_rms
-                    self.text_dict[clust_name]["ver_rms"] = ver_rms
-                    self.text_dict[clust_name]["xmean"] = xmean
-                    self.text_dict[clust_name]["ymean"] = ymean
-                    self.text_dict[clust_name]["elongation_num"] = elongation_num
-
                     #Populate mid_z_dict if at mid z-sclie
                     if is_mid and not self.is_line(hor_rms, elongation_num):
                         # print("HERE is curr_clsut: ", curr_clust)
                         num_pts = curr_clust.shape[0]
 
-                        #TODO replace this call with the filtering func
-                        # print("HERE is num of ptS: ", num_pts)
-                        self.mid_z_dict[clust_name]["num_pts"] = num_pts
-                        self.mid_z_dict[clust_name]["xmean"] = xmean
-                        self.mid_z_dict[clust_name]["ymean"] = ymean
+                        if num_pts < 1000: #Checking if the cluster is absurd
 
-                        count += 1
+                            #TODO replace this call with the filtering func
+                            # print("HERE is num of ptS: ", num_pts)
+                            self.mid_z_dict[clust_name]["num_pts"] = num_pts
+                            self.mid_z_dict[clust_name]["xmean"] = xmean
+                            self.mid_z_dict[clust_name]["ymean"] = ymean
+
+                            #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
+                            self.text_dict[clust_name]["hor_rms"] = hor_rms
+                            self.text_dict[clust_name]["ver_rms"] = ver_rms
+                            self.text_dict[clust_name]["xmean"] = xmean
+                            self.text_dict[clust_name]["ymean"] = ymean
+                            self.text_dict[clust_name]["elongation_num"] = elongation_num
+
+                            count += 1
                     
 
 
@@ -356,8 +358,9 @@ class TreeFinder:
             return hor_rms, ver_rms, elongation_num  
 
     def is_line(self, hor_rms, elongation_num):
-        if hor_rms >= self.hor_rms_threshold: #or elongation_num <= self.elongation_num_threshold:
+        if hor_rms > self.hor_rms_threshold or elongation_num > self.elongation_num_threshold:
             print("HERE is hor_rms fFOR LINE ", hor_rms) 
+            print("HERE is hor_rms fFOR LINE ", elongation_num) 
             return True
 
         return False
@@ -389,7 +392,7 @@ class TreeFinder:
             
 
             if n_clusters > 0 and len(self.mid_z_dict):
-                for i in range(n_clusters-1):
+                for i in range(n_clusters): #TODO mayber change back to -1???
                     tree = KDTree(self.all_vpancakes, leaf_size =self.leaf_size)
                     clust_name = f"Cluster {i}"
 
@@ -419,8 +422,26 @@ class TreeFinder:
 
                     all_z = fitted_comps[:, 2]
                     max_z_index = np.argmax(all_z)
-
                     z_eig = fitted_comps[max_z_index]
+
+                    #Putting values in visualization dict
+                    all_x = fitted_comps[:, 0]
+                    max_x_index = np.argmax(all_x)
+                    x_eig = fitted_comps[max_x_index]
+
+                    all_y = fitted_comps[:, 1]
+                    max_y_index = np.argmax(all_y)
+                    y_eig = fitted_comps[max_y_index]
+
+                    # print("HERE is clust_name in kd_tree_PCa: ", clust_name)
+                    self.text_dict[clust_name]["x_eig"] = x_eig
+                    self.text_dict[clust_name]["x_index"] = max_x_index
+                    self.text_dict[clust_name]["y_eig"] = y_eig
+                    self.text_dict[clust_name]["y_index"] = max_y_index
+                    self.text_dict[clust_name]["z_eig"] = z_eig
+                    self.text_dict[clust_name]["z_index"] = max_z_index
+
+                    
 
                     # print("HERE is max_z_index: ", max_z_index)
                     # print("HERE is z_eig: ", z_eig, "\n")
@@ -527,9 +548,8 @@ class TreeFinder:
                 marker.type = Marker.TEXT_VIEW_FACING
                 marker.action = Marker.ADD
 
-                # print("HERE is text dict: ", self.text_dict)
-                # print("HERE is cluster var: ", cluster[1])
-                clus_num = cluster[1]
+                # print("HERE is text dict: ", self.text_dict, "\n")
+                clus_num = cluster[1] #API have to do, 0 is index
                 # Position of the text in 3D space
                 marker.pose.position.x = self.text_dict[clus_num]["xmean"]
                 marker.pose.position.y = self.text_dict[clus_num]["ymean"]
@@ -537,19 +557,26 @@ class TreeFinder:
                 marker.pose.orientation.w = 1.0
                 
                 # Text scale/size (Z controls height of capital letters)
-                marker.scale.z = 0.3
+                marker.scale.z = 0.15
                 
                 # Text color
                 marker.color.r = 0
                 marker.color.g = 0
-                marker.color.b = 0
+                marker.color.b = 1.0
                 marker.color.a = 1.0
 
                 hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
                 ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)
                 elong = round(self.text_dict[clus_num]["elongation_num"], 4)
+
+                x_eig = np.round(self.text_dict[clus_num]["x_eig"], decimals=4)
+                x_index = self.text_dict[clus_num]["x_index"]
+                y_eig = np.round(self.text_dict[clus_num]["y_eig"], decimals=4)
+                y_index = round(self.text_dict[clus_num]["y_index"], 4)
+                z_eig = self.text_dict[clus_num]["z_eig"]
+                z_index = np.round(self.text_dict[clus_num]["z_index"], decimals=4)
                 
-                marker.text = f"hor_rms: {hor_rms}, \nver_rms: {ver_rms}, \nelongation: {elong}"
+                marker.text = f"hor_rms: {hor_rms}, ver_rms: {ver_rms}, elongation: {elong}, \nx_eig: {x_eig}, x_index: {x_index}, \ny_eig: {y_eig}, y_index: {y_index}, \nz_eig: {z_eig}, z_index: {z_index}"
                 marker.lifetime = rospy.Duration(0.1)  # Refresh duration
                 
                 marker_array.markers.append(marker)
