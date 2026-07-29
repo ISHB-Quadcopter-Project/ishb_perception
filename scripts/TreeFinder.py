@@ -16,7 +16,7 @@ from collections import deque, defaultdict
 from sklearn.neighbors import KDTree
 from sklearn.decomposition import PCA
 
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
 
@@ -35,6 +35,8 @@ class TreeFinder:
         self.pub_cloud = rospy.Publisher("/Z_CLUSTERS", PointCloud2, queue_size = 10)
 
         self.pub_line = rospy.Publisher("LINES", PointCloud2, queue_size = 10)
+
+        self.pub_text = rospy.Publisher('/TEXT', MarkerArray, queue_size=10)
 
         #Sub to cum cloud
         self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
@@ -81,6 +83,8 @@ class TreeFinder:
         self.all_vpancakes = None
         self.pub_line_list= []
         self.leaf_size = 80
+
+        self.text_dict = defaultdict(dict)
 
 
         #TODO OLD STUFF: Tree Confirmation Parameters
@@ -168,6 +172,7 @@ class TreeFinder:
             # print("HERE is self.cand_tree shape: ", self.cand_trees.shape
             self.publ()
             self.pub_line_list.clear()
+            self.text_dict.clear()
         #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
@@ -193,6 +198,15 @@ class TreeFinder:
                     #Getting relevant cluster info from eigen func
                     hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
 
+                    clust_name = f"Cluster {count}"
+
+                    #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
+                    self.text_dict[clust_name]["hor_rms"] = hor_rms
+                    self.text_dict[clust_name]["ver_rms"] = ver_rms
+                    self.text_dict[clust_name]["xmean"] = xmean
+                    self.text_dict[clust_name]["ymean"] = ymean
+                    self.text_dict[clust_name]["elongation_num"] = elongation_num
+
                     #Populate mid_z_dict if at mid z-sclie
                     if is_mid and not self.is_line(hor_rms, elongation_num):
                         # print("HERE is curr_clsut: ", curr_clust)
@@ -200,7 +214,6 @@ class TreeFinder:
 
                         #TODO replace this call with the filtering func
                         # print("HERE is num of ptS: ", num_pts)
-                        clust_name = f"Cluster {count}"
                         self.mid_z_dict[clust_name]["num_pts"] = num_pts
                         self.mid_z_dict[clust_name]["xmean"] = xmean
                         self.mid_z_dict[clust_name]["ymean"] = ymean
@@ -219,7 +232,7 @@ class TreeFinder:
                     #TODO if else statement for returned value for is big func ARTIFACT???
 
                 #TODO
-                print("HERE is count: ", count)
+                # print("HERE is count: ", count)
                 self.kd_tree_PCA(count) #Call #TODO filtering func, after for loop so dict is fully populated
                 return e_array
             return None
@@ -336,7 +349,7 @@ class TreeFinder:
                 elongation_num = math.sqrt(hor_rms/ver_rms)
             else:
                 elongation_num = 0
-            # print("HERE is hor_rms: ", hor_rms)
+            # print("HERE is hor_rms in eign func: ", hor_rms)
             # print("HERE is ver_rms: ", ver_rms)
             # print("HERE is elong: ", elongation_num)
     
@@ -344,6 +357,7 @@ class TreeFinder:
 
     def is_line(self, hor_rms, elongation_num):
         if hor_rms >= self.hor_rms_threshold: #or elongation_num <= self.elongation_num_threshold:
+            print("HERE is hor_rms fFOR LINE ", hor_rms) 
             return True
 
         return False
@@ -381,7 +395,7 @@ class TreeFinder:
 
                     # print("HERe is n_clusters: ", n_clusters)
                     # print("HERE is clust_name: ", clust_name)
-                    print("HERE is z_mid_dict: ", self.mid_z_dict)
+                    # print("HERE is z_mid_dict: ", self.mid_z_dict)
                     centriod = np.array([self.mid_z_dict[clust_name]["xmean"], self.mid_z_dict[clust_name]["ymean"], self.mid_height]) #self.mid_height is a const in init
 
                     # print("HERE is CENTRIOD: ", centriod)
@@ -500,6 +514,48 @@ class TreeFinder:
             line_stacked = np.vstack(self.pub_line_list)
             line_cloud = self.make_pointcloud2_xyz32(header, line_stacked)
             self.pub_line.publish(line_cloud)
+
+        #TODO check if the text dict is len, then publish
+        if len(self.text_dict):
+            marker_array = MarkerArray()
+
+            for cluster in enumerate(self.text_dict):
+                marker = Marker()
+                marker.header = header
+                marker.ns = "text_messages"
+                marker.id = cluster[0]  # Unique ID per text string
+                marker.type = Marker.TEXT_VIEW_FACING
+                marker.action = Marker.ADD
+
+                # print("HERE is text dict: ", self.text_dict)
+                # print("HERE is cluster var: ", cluster[1])
+                clus_num = cluster[1]
+                # Position of the text in 3D space
+                marker.pose.position.x = self.text_dict[clus_num]["xmean"]
+                marker.pose.position.y = self.text_dict[clus_num]["ymean"]
+                marker.pose.position.z = 10
+                marker.pose.orientation.w = 1.0
+                
+                # Text scale/size (Z controls height of capital letters)
+                marker.scale.z = 0.3
+                
+                # Text color
+                marker.color.r = 0
+                marker.color.g = 0
+                marker.color.b = 0
+                marker.color.a = 1.0
+
+                hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
+                ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)
+                elong = round(self.text_dict[clus_num]["elongation_num"], 4)
+                
+                marker.text = f"hor_rms: {hor_rms}, \nver_rms: {ver_rms}, \nelongation: {elong}"
+                marker.lifetime = rospy.Duration(0.1)  # Refresh duration
+                
+                marker_array.markers.append(marker)
+
+            self.pub_text.publish(marker_array)
+
         # if len(self.PCA_zaxis_list):
         #     marker = Marker()
         #     marker.header.frame_id = "world"
