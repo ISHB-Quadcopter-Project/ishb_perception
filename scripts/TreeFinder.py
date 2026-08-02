@@ -104,7 +104,8 @@ class TreeFinder:
 #-------Subscriber Thread--------
     def cloud_cb(self, msg):
         """!@brief Callback function for the /Cum_Cloud topic.
-            @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder"""
+            @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder
+            @see cut_cloud"""
         self.latest_cloud = cloud_to_xyz(msg)
         self.processed_cloud_list.clear()
 
@@ -123,10 +124,10 @@ class TreeFinder:
         z_high = z_mid + self.pancake_thickness/2
         z_low = z_mid - self.pancake_thickness/2
 
-        #This mask looking from points in a range of z values. However, these z's step by the voxel_size naturally (cloud alr voxeled)
+        #This mask looking from points in a z slice. However, these z's step by the voxel_size naturally (cloud alr voxeled)
         mask = (uncut_cloud[:,2] >= z_low) & (uncut_cloud[:,2] <= z_high)
 
-        #Apply mask to the uncut_cloud, to "cut" it at our range of z values
+        #Apply mask to the uncut_cloud, to "cut" it at our z slice
         cut_cloud = uncut_cloud[mask]
         intcast_cloud = (cut_cloud*1000000).astype(np.int64) 
 
@@ -146,8 +147,11 @@ class TreeFinder:
         #Return cut_cloud with indices that only include uniqe x,y's
         return cut_cloud[first,0:2] 
 
+
     def on_timer(self,event):
-        """!@brief Timer callback to"""
+        """!@brief Timer callback to call centroid_finder on each z-slices. Calls publ too.
+            @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice.
+            @see centroid_finder"""
         i = 1
         with self.lock:
             if len(self.processed_cloud_list):
@@ -160,18 +164,18 @@ class TreeFinder:
                         is_mid = True
 
                     self.mid_z_dict.clear()#Clear dict for mid slice, before poulate again with new clustering
-                    e_array = self.centroid_finder(pancake_num, is_mid) #TODO pass another param here ditate whether at mid cluster, so execute dif logis in centriod_finder
+                    self.centroid_finder(pancake_num, is_mid)
 
-                    if e_array is not None:
-                        # not_zero_mask = [e_array != (0,0,0,0,0,0)]
-                        # print("EARRAY: ", e_array)
-                        # print("EARRAY shape: ", e_array.shape)
+                    # if e_array is not None:
+                    #     # not_zero_mask = [e_array != (0,0,0,0,0,0)]
+                    #     # print("EARRAY: ", e_array)
+                    #     # print("EARRAY shape: ", e_array.shape)
 
-                        not_zero_mask = np.any(e_array != 0, axis =1)
-                        # print("HERE IS not zero mask: ", not_zero_mask)
-                        cleaned_e_array = e_array[not_zero_mask]
+                    #     not_zero_mask = np.any(e_array != 0, axis =1)
+                    #     # print("HERE IS not zero mask: ", not_zero_mask)
+                    #     cleaned_e_array = e_array[not_zero_mask]
 
-                        self.cand_trees[pancake_num] = cleaned_e_array
+                    #     self.cand_trees[pancake_num] = cleaned_e_array
 
                     i += 1
 
@@ -187,6 +191,9 @@ class TreeFinder:
         #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
+        """!@brief Calls clustering on each z-slice. If it is the middle z-slice and not line shaped, then saving relevant info for kd_tree_PCA and also publishing text.
+            @see is_line @see clustering @see kd_tree_PCA
+            @todo return is artifact of e_array stuff"""
         # print("HERE is which inside of centriod findeer: ", which)
         # print("proc cloud list length::::::::::::: " ,len(self.processed_cloud_list))
         count = 0
@@ -197,7 +204,7 @@ class TreeFinder:
 
             # self.centroid_list = np.zeros((n_clusters-1,3))
             if n_clusters > 0:
-                e_array = np.zeros((n_clusters-1, 6))
+                # e_array = np.zeros((n_clusters-1, 6))
                 self.clustered_cloud_list = self.xy[labels != -1]
                 # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
 
@@ -247,13 +254,15 @@ class TreeFinder:
                 #TODO
                 # print("HERE is count: ", count)
                 self.kd_tree_PCA(count) #Call #TODO filtering func, after for loop so dict is fully populated
-                return e_array
+                # return e_array
             return None
 
+    #---Fork 1 called by centriod_finder---
     def clustering(self, points, which): 
+        """!@brief Clusters a point cloud using DBSCAN and returns the labels and number of clusters.
+            @details calls _save_cluster_plot for debugging purposes.
+            @return The labels and number of clusters"""
         
-        """points: (N,2) or (N,3) float array, metres.
-        Returns (labels, n_clusters). Label -1 == noise."""
         if points.shape[0] < self.min_samples: #num of coordinates to cluster < min samples
             return np.full(points.shape[0], -1, dtype=int), 0 #return [-1,-1,-1] labels anda zero b/s not eenoguh pts to even make one cluster (def no trees nearby)
 
@@ -283,28 +292,12 @@ class TreeFinder:
             #coudl also think about changing the savecluterplot funciton to have multiple plots
 
             now = rospy.Time.now()
-            self._save_cluster_plot(self.xy, labels, n_clusters, now ,which)
-            # if ( self._last_plot[which] == None):
-            #     self._last_plot[which].append(now)
-            #     self._save_cluster_plot(self.xy, labels, n_clusters, now ,which)
-
-            # elif (now - self._last_plot[which]).to_sec() >= self.plot_period: #This ensure one short plot is created every plot period
-            #     self._last_plot[which] = now
-            #     self._save_cluster_plot(self.xy, labels, n_clusters, now ,which)
-            # if which:
-            #     now = rospy.Time.now()
-            #     if (now - self._last_plot_short).to_sec() >= self.plot_period: #This ensure one short plot is created every plot period
-            #         self._last_plot_short = now
-            #         self._save_cluster_plot(self.xy, labels, n_clusters, now_short ,which)
-            # else:
-            #     now = rospy.Time.now()
-            #     if (now - self._last_plot_tall).to_sec() >= self.plot_period: #This ensure one tall plot is created every plot period
-            #         self._last_plot_tall = now
-            #         self._save_cluster_plot(self.xy, labels, n_clusters, now_tall ,which)                    
+            self._save_cluster_plot(self.xy, labels, n_clusters, now ,which)                
 
         return labels, n_clusters
 
     def _save_cluster_plot(self, xy, labels, n_clusters, stamp ,which): #TODO update the which swiching logic, , mayb ea folder for each time step, chat will do though
+        """!@brief Saves a plot of the clustered point cloud for debugging purposes."""
         ax = self._ax
         ax.cla()
 
@@ -341,11 +334,10 @@ class TreeFinder:
         
         ax.grid(True, linewidth=0.3, alpha=0.5)
     
-
-
-
-    #------Tree Confirmation Step Func-----
+    #---Fork 2 called by centriod_finder---
     def eigen(self, curr_clust, xmean, ymean):
+            """!@brief Calculates the eigenvalues and eigenvectors of a cluster from the covariance matrix.
+                @return The horizontal RMS, vertical RMS, and elongation number of the cluster."""
             normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
             #  print("HERE is normalized shape: ", normalized.shape)
     
@@ -367,23 +359,26 @@ class TreeFinder:
             # print("HERE is elong: ", elongation_num)
     
             return hor_rms, ver_rms, elongation_num  
-
+    
     def is_line(self, hor_rms, elongation_num):
+        """!@brief Determines if a cluster is line shaped based on horizontal RMS and elongation number.
+            @return True if the cluster is line shaped, False otherwise."""
         if hor_rms > self.hor_rms_threshold or elongation_num > self.elongation_num_threshold:
             print("HERE is hor_rms fFOR LINE ", hor_rms) 
             print("HERE is hor_rms fFOR LINE ", elongation_num) 
             return True
 
         return False
-         
 
-    #--------New alg funcs--------
-    #TODO KDtree. This will access elements from mid-z-slice dict. Outputs numpy arrays for the 3D assoicated clusters for potential trees.
-    #Use processed cloud llist, to access all the "pancakes"
+    #---Fork 3 called by centriod_finder---
     def kd_tree_PCA(self, n_clusters):
+        """!@brief Performs PCA on the clusters in the mid z-slice on a KDTree across all z-slices' clusters"""
         if len(self.clustered_cloud_list):
             # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
             # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
+
+            #Adding z values to the clustered cloud list, to make a 3D point cloud for KDTree and PCA, appending to all_pancakes list
+            print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
             all_pancakes = []
             for i in range(self.pancake_stacks):
                 curr_z = self.pancake_start + (self.pancake_gap * i)
@@ -397,8 +392,6 @@ class TreeFinder:
                 # print("HERE is all_panacakes: ", all_pancakes)
 
             #V stacks all pancakes verically, to give KDtree all points from all pancakes
-
-            # print("HERE is all_pancakes: ", all_pancakes)
             self.all_vpancakes = np.vstack(all_pancakes)
             
 
