@@ -31,6 +31,7 @@ import threading
 import math
 import numpy as np
 from collections import deque 
+from common import *
 
 class Accumulator:
     def __init__(self): 
@@ -57,7 +58,7 @@ class Accumulator:
         #For make cloud
         self.voxel_size = 0.067 #Width of voxels
         self.numframes = 10 # how long temporal window lasts in seconds * 10, how many saved clouds
-        self.cloud_list = deque(maxlen = self.numframes)
+        self.cloud_list = deque(maxlen = self.numframes) #List with downsampled cloud entries
         self.radius = 20 #Bounding radius
         self.cloud_array = None  
         self.voxel_array = None
@@ -69,64 +70,22 @@ class Accumulator:
         #Timer
         rospy.Timer(rospy.Duration(.1), self.on_timer)  # 10 Hz
 
-    def publ(self):
-        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
-        self.cum_cloud = self.make_pointcloud2_xyz32(header, self.voxel_array)
-        self.pub.publish(self.cum_cloud)
-
-    @staticmethod
-    def make_pointcloud2_xyz32(header, points):
-        """Build an XYZ32 PointCloud2 via one tobytes() instead of a Python
-        per-point pack loop (which is what create_cloud_xyz32 does internally)."""
-        #because you are reinterpreting numpy arrays, point_cloud2 namespace message fields use raw bytes for information with a very specific formation, and 
-        #msg.data = points.tobytes() is used, turning it into a contiguous array 
-        #protects the information and dfines the type of each array value before turning it back
-        points = np.ascontiguousarray(points, dtype=np.float32)  # (N,3), row-major x,y,z
-        msg = PointCloud2()
-        msg.header = header
-        msg.height = 1 #height 1, being an unorganized point cloud
-        msg.width = points.shape[0] # width is just how many points there are 
-        msg.fields = [
-            PointField('x', 0, PointField.FLOAT32, 1),
-            PointField('y', 4, PointField.FLOAT32, 1),
-            PointField('z', 8, PointField.FLOAT32, 1),
-        ]
-        msg.is_bigendian = False #little endian
-        msg.point_step = 12
-        msg.row_step = 12 * points.shape[0]
-        msg.is_dense = True #Assume no NaN
-        msg.data = points.tobytes()
-        return msg
-
-        
-    
-    def cloud_to_xyz(self, msg):
-        # For FAST-LIO's /cloud_registered: x,y,z are float32 at offsets 0,4,8
-
-        #defining the type of the datanp.dyte('name of this field', 'type of field', 'how many bits this part takes')
-        #here, four fields fields can be stacked to be define the fields of incoming PointCloud2 message
-        dtype = np.dtype([     
-            ('x', np.float32), ('y', np.float32), ('z', np.float32),
-            ('_pad', np.uint8, msg.point_step - 12)
-        ])
-        #contiguous array not needed, as not turning numpy-> binary blob, its just binary blob parsed into binary blob
-        #
-        arr = np.frombuffer(msg.data, dtype=dtype, count=msg.width * msg.height)
-        # the buffer is the the data being locked, and what threads write to, its a sort of temp memory(doesnt need to be locked, we have our own version of msg due to callback writing to self.something)
-        # frombuffer reads data without copying it, treating it as a 1d array, and keeping only(in this case)
-        # reads msg.data in the thread, interprets as .data, which is a Pointcloud2 message, dtype recreating our version of the Pointcloud2 message format, 
-        # with the size of the buffer being read as the size of the whole pointcloud
-        # (how many points there are in the pointcloud, given by msg.heigh/width, parameters of passed message)
-        return np.column_stack((arr['x'], arr['y'], arr['z']))
-
+#-------Subscriber Thread--------
     def odom_cb(self, msg):
+        """!@see ourNode.ourNode.odom_cb"""
         with self.lock:
             self.latest_pos = msg.pose.pose.position
             #print("INSIDE HERE IS P: ", self.latest_pos)
             self.is_odom = True # latest_pos odom should be set by now
 
     def cloud_cb(self, msg):
-        self.latest_cloud = self.cloud_to_xyz(msg) 
+        """!@brief Callback function for the /cloud_registered topic
+            @details Updates the latest point cloud data using cloud_to_xyz(). Appends a downsampled version of the point cloud by calling down_cloud() to a deque list of max len 10 (FIFO) for make_cloud().
+            @note self.lock is used to ensure publishing thread using cloud data don't get partial data, as this callback is in a separate thread
+            @param msg The PointCloud2 message received from the /cloud_registered topic
+            @see cloud_to_xyz @see down_cloud @see make_cloud"""
+
+        self.latest_cloud = cloud_to_xyz(msg) 
 
         reduced = self.down_cloud(self.latest_cloud) #Downsample outside lock to avoid thread being locked excessively
 
@@ -134,29 +93,21 @@ class Accumulator:
             if len(self.latest_cloud):
                 self.cloud_list.append(reduced)
         
-    def down_cloud(self, cloud):
-        #This get's the bin num, for assigning bin indexes to each downsampled voxel box
-        bins = np.floor( cloud / self.voxel_size).astype(np.int64) 
 
-        #This turns all the bin num to pos, by sub most neg xyz pt in cloud (found w/ axis = 0)
-        pos_bins = bins - bins.min(axis=0)
+#-------Publisher Thread--------
+    def on_timer(self,event):
+        """!@brief Timer callback function that is called every 0.1 seconds. Calls make_cloud and publ.
+            @details This func checks if there is odometry data and if numpy array from make_cloud was populated
+            @see odom_cb @see make_cloud @see publ"""
+        #if odometry and unique cloud window is open, then publish
+        if self.is_odom and self.make_cloud():
+            self.publ()
 
-        #Key is a 64 bit int, it all cloud pts in order: x, y, z. Uses pos bin so no need for 2s cmp or any goofy stuff
-        key = (pos_bins[:, 0] << 42) | (pos_bins[:,1] << 21) | pos_bins[:, 2] 
-
-        #Only grabbing indices of the unique pos x,y,z in 1D key (np.unique beta w/). Note these alr been voxeled
-        _, first = np.unique(key, return_index = True) 
-
-        #Now we have the indices of the unique voxel bins b/c first collerates to rows, we now use the og array of voxel bins, scaling by voxel size. 
-        voxel_cen = (bins[first] + 0.5) * self.voxel_size #Adding +0.5 to move from corner voxel box to center
-
-        return voxel_cen
-
-    def make_cloud(self, odom):
-        #use latest saved odometry data
-        Odomx = odom.x
-        Odomy = odom.y
-        Odomz = odom.z
+    def make_cloud(self):
+        """!@brief Creates a cumulative point cloud from the downsampled point clouds in the cloud_list deque
+            @details The down sampled clouds in cloud_list are bounded by a radius.
+            @return 1 if the cumulative point cloud is not empty, 0 otherwise
+            @see down_cloud"""
         #reshapes the voxeled cloud deque, so that each cloud in the deque(num frames long) accessed/parsed easier
         self.cloud_array = np.vstack(self.cloud_list)
 
@@ -170,23 +121,58 @@ class Accumulator:
         # bounded = cloud_array indexed with boolean mask to save only bounded cloud points
         self.bounded = self.cloud_array[norms < self.radius]
         #use down_cloud not republish repeated voxels
-        self.voxel_array = self.down_cloud(self.bounded)   # this is not below vstack, as its done before bounding to lessen how many thigns go into down_cloud
+        self.voxel_array = self.down_cloud(self.bounded)   # this is below vstack, as its done after bounding to lessen how many thigns go into down_cloud
         #if voxel array, is not empty, return 1, else return 0
-        #in other words, return 1 unless if no occupied voxels, return 0
+        #in other words, return 1 unless there is no occupied voxels, return 0
         #saves us from publishing empty map, which would cause error at worst and waste memory at best
         if len(self.voxel_array):
             return 1
         return 0
 
+    def publ(self):
+        """!@brief Publishes the cumulative bounded point cloud to the /Cum_Cloud topic
+            @details Creates a PointCloud2 message using make_pointcloud2_xyz32().
+            @see common.make_pointcloud2_xyz32"""
+        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
+        self.cum_cloud = make_pointcloud2_xyz32(header, self.voxel_array)
+        self.pub.publish(self.cum_cloud)
+
+
+#-------Helper funcs--------
+    def down_cloud(self, cloud):
+        """!@brief Downsamples a point cloud using voxelization
+            @details Quick Summary of the Alogrithm: 
+            1) Place each point in the cloud inside of a integer "bin" number by dividing each of it's coordinates by voxel_size and flooring the result. 
+            2) Make all bin numbers in the numpy array to be positive to avoid using 2's complement
+            3) Pass a key containing the shifted pos bin numpy array to np.unique() to get the indices of the unique voxel bins
+            @note The bit shifting operation << is vectorized for a numpy array, performing it element wise. This means each pos bin coordinate (x, y, or z) in the array is shifted without np.unique() having to compare rows
+            , making it faster. Additionally, the | operation is vectorized too.
+            @note CPU usage is droppped from 39.5% to 7% using the alogirthm above
+            @return A numpy array of shape (N, 3) containing the XYZ coordinates of the downsampled point cloud"""
+        
+        #This get's the bin num, for assigning bin indexes to each downsampled voxel box
+        bins = np.floor( cloud / self.voxel_size).astype(np.int64) 
+
+        #This turns all the bin num to pos, by sub most neg xyz pt in cloud (found w/ axis = 0)
+        pos_bins = bins - bins.min(axis=0)
+
+        #Key is a 64 bit int, it pos bins of all cloud pts in order: x, y, z. Uses pos bin so no need for 2s cmp or any goofy stuff
+        key = (pos_bins[:, 0] << 42) | (pos_bins[:,1] << 21) | pos_bins[:, 2] 
+
+        #Only grabbing indices of the unique pos x,y,z in 1D key (np.unique beta w/). Note these alr been voxeled
+        _, first = np.unique(key, return_index = True) 
+
+        #Now we have the indices of the unique voxel bins b/c first collerates to rows, we now use the og array of voxel bins, scaling by voxel size. 
+        voxel_cen = (bins[first] + 0.5) * self.voxel_size #Adding +0.5 to move from corner voxel box to center
+
+        #With using this line below instead, CPU usage is 39.5% verus 7% with the code above
+        # voxel_cen = self.voxel_size * np.unique(np.round(cloud/ self.voxel_size), axis=0)
+
+        return voxel_cen
+
     def run(self):
         rospy.spin()
 
-
-    def on_timer(self,event):
-        odom = self.latest_pos
-        #if odometry and unique cloud window is open, then publish
-        if self.is_odom and self.make_cloud(self.latest_pos):
-            self.publ()
 
 def main():
     rospy.init_node("Accumulator") #Make the node

@@ -19,6 +19,8 @@ from sklearn.decomposition import PCA
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
+from common import *
+
 
 
 #TODO We want to do two things A) find poss trees B) sep class at least, goes up to poss tree, and estimates radius, and reonsiders dist from tree for cam, and reconsiders tree placements
@@ -48,7 +50,7 @@ class TreeFinder:
 
         self.latest_cloud = None
         
-        self.pancake_stacks = 7
+        self.pancake_stacks = 5
         self.pancake_start = round(5 * 0.067, 5)  #5 before
         self.pancake_gap = round(1 * 0.067, 5) #TODO This has to be small for new alg
         self.pancake_thickness = round(1 * 0.067, 5)
@@ -99,9 +101,11 @@ class TreeFinder:
         rospy.spin()
 
     
-
+#-------Subscriber Thread--------
     def cloud_cb(self, msg):
-        self.latest_cloud = self.cloud_to_xyz(msg)
+        """!@brief Callback function for the /Cum_Cloud topic.
+            @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder"""
+        self.latest_cloud = cloud_to_xyz(msg)
         self.processed_cloud_list.clear()
 
         for i in range(self.pancake_stacks):
@@ -110,9 +114,15 @@ class TreeFinder:
             self.processed_cloud_list.append(processed_cloud)
 
     def cut_cloud(self, uncut_cloud, z_mid):
+        """!@brief Cuts a point cloud to a specified z-range and returns x,y coordinates inside range.
+            @details A boolean for the specified z-range is created, to "cut" the cloud. A bit-packed key is created for the x,y coordinates, to find make finding unique x,y coordinates faster. This part is similar to Accumulator.Accumulator.down_cloud
+            @param uncut_cloud The point cloud to cut
+            @param z_mid The middle height of the z-range to cut
+            @return A numpy array of shape (N, 2) containing the x,y coordinates of the points in the specified z-range"""
         # print("HERE is pre processed z: ", uncut_cloud[:,2])
         z_high = z_mid + self.pancake_thickness/2
         z_low = z_mid - self.pancake_thickness/2
+
         #This mask looking from points in a range of z values. However, these z's step by the voxel_size naturally (cloud alr voxeled)
         mask = (uncut_cloud[:,2] >= z_low) & (uncut_cloud[:,2] <= z_high)
 
@@ -137,6 +147,7 @@ class TreeFinder:
         return cut_cloud[first,0:2] 
 
     def on_timer(self,event):
+        """!@brief Timer callback to"""
         i = 1
         with self.lock:
             if len(self.processed_cloud_list):
@@ -477,49 +488,7 @@ class TreeFinder:
     #TODO Filtering func. This will call PCA func, take the outputed numpy array (either reutnr of make global idk yet), and pass into PCA func. This willl then
     #take the poential trees PCA said aren't trees, and filter the cand_trees (or make a new list) accordingly
 
-    #-------Helper funcs and pub------
-
-    def cloud_to_xyz(self, msg):
-        # For FAST-LIO's /cloud_registered: x,y,z are float32 at offsets 0,4,8
-
-        #defining the type of the datanp.dyte('name of this field', 'type of field', 'how many bits this part takes')
-        #here, four fields fields can be stacked to be define the fields of incoming PointCloud2 message
-        dtype = np.dtype([     
-            ('x', np.float32), ('y', np.float32), ('z', np.float32),
-            ('_pad', np.uint8, msg.point_step - 12)
-        ])
-        #contiguous array not needed, as not turning numpy-> binary blob, its just binary blob parsed into binary blob
-        #
-        arr = np.frombuffer(msg.data, dtype=dtype, count=msg.width * msg.height)
-        # the buffer is the the data being locked, and what threads write to, its a sort of temp memory(doesnt need to be locked, we have our own version of msg due to callback writing to self.something)
-        # frombuffer reads data without copying it, treating it as a 1d array, and keeping only(in this case)
-        # reads msg.data in the thread, interprets as .data, which is a Pointcloud2 message, dtype recreating our version of the Pointcloud2 message format, 
-        # with the size of the buffer being read as the size of the whole pointcloud
-        # (how many points there are in the pointcloud, given by msg.heigh/width, parameters of passed message)
-        return np.column_stack((arr['x'], arr['y'], arr['z']))
-
-    def make_pointcloud2_xyz32(self, header, points):
-        """Build an XYZ32 PointCloud2 via one tobytes() instead of a Python
-        per-point pack loop (which is what create_cloud_xyz32 does internally)."""
-        #because you are reinterpreting numpy arrays, point_cloud2 namespace message fields use raw bytes for information with a very specific formation, and 
-        #msg.data = points.tobytes() is used, turning it into a contiguous array 
-        #protects the information and dfines the type of each array value before turning it back
-        points = np.ascontiguousarray(points, dtype=np.float32)  # (N,3), row-major x,y,z
-        msg = PointCloud2()
-        msg.header = header
-        msg.height = 1 #height 1, being an unorganized point cloud
-        msg.width = points.shape[0] # width is just how many points there are 
-        msg.fields = [
-            PointField('x', 0, PointField.FLOAT32, 1),
-            PointField('y', 4, PointField.FLOAT32, 1),
-            PointField('z', 8, PointField.FLOAT32, 1),
-        ]
-        msg.is_bigendian = False
-        msg.point_step = 12
-        msg.row_step = 12 * points.shape[0]
-        msg.is_dense = True
-        msg.data = points.tobytes()
-        return msg     
+    #-------Publish------
 
     def publ(self):#TODO publish the PCA z-axis???
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
@@ -527,13 +496,13 @@ class TreeFinder:
             #TODO uncomment and fix the can't concatinate error
             # print("HERE IS publish_list: ", self.publish_list)
             # stacked_pub_list = np.vstack(self.publish_list)
-            cluster_cloud = self.make_pointcloud2_xyz32(header, self.all_vpancakes)
+            cluster_cloud = make_pointcloud2_xyz32(header, self.all_vpancakes)
             self.pub_cloud.publish(cluster_cloud)
         # print("Before if state here the pub linke ist: ", self.pub_line_list)
         if len(self.pub_line_list):
             # print("HERE is self.pub_line_list: ", self.pub_line_list)
             line_stacked = np.vstack(self.pub_line_list)
-            line_cloud = self.make_pointcloud2_xyz32(header, line_stacked)
+            line_cloud = make_pointcloud2_xyz32(header, line_stacked)
             self.pub_line.publish(line_cloud)
 
         #TODO check if the text dict is len, then publish
