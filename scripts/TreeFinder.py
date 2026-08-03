@@ -50,10 +50,10 @@ class TreeFinder:
 
         self.latest_cloud = None
         
-        self.pancake_stacks = 5
-        self.pancake_start = round(5 * 0.067, 5)  #5 before
-        self.pancake_gap = round(1 * 0.067, 5) #TODO This has to be small for new alg
-        self.pancake_thickness = round(1 * 0.067, 5)
+        self.pancake_stacks = 12
+        self.pancake_start = round(4 * 0.067, 5)  #5 before
+        self.pancake_gap = round(2 * 0.067, 5) #TODO This has to be small for new alg
+        self.pancake_thickness = round(3 * 0.067, 5)
         self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
         self.xy = None
         self.centroid_list = None
@@ -88,6 +88,7 @@ class TreeFinder:
 
         self.text_dict = defaultdict(dict)
         self.mid_count = 0
+        self.angle_threshold = 25 #degrees, for determining if a cluster is vertical or not
 
 
         #TODO OLD STUFF: Tree Confirmation Parameters
@@ -190,10 +191,11 @@ class TreeFinder:
             self.pub_line_list.clear()
             self.text_dict.clear()
             self.mid_z_dict.clear() #Clear dict for mid slice, before poulate again with new clustering
+            self.clustered_cloud_list.clear()
         #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
-        """!@brief Calls clustering on each z-slice. If it is the middle z-slice and not line shaped, then saving relevant info for kd_tree_PCA and also publishing text.
+        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saving relevant info for kd_tree_PCA and also publishing text.
             @see is_line @see clustering @see kd_tree_PCA
             @todo return is artifact of e_array stuff"""
         # print("HERE is which inside of centriod findeer: ", which)
@@ -368,16 +370,23 @@ class TreeFinder:
         """!@brief Determines if a cluster is line shaped based on horizontal RMS and elongation number.
             @return True if the cluster is line shaped, False otherwise."""
         if hor_rms > self.hor_rms_threshold or elongation_num > self.elongation_num_threshold:
-            print("HERE is hor_rms fFOR LINE ", hor_rms) 
-            print("HERE is hor_rms fFOR LINE ", elongation_num) 
+            # print("HERE is hor_rms fFOR LINE ", hor_rms) 
+            # print("HERE is hor_rms fFOR LINE ", elongation_num) 
             return True
 
         return False
 
+    def is_vertical(self, z_eig):
+        dot = np.dot(z_eig, np.array([0,0,1]))
+        z_eig_mag = np.linalg.norm(z_eig)
+        angle = np.arccos(dot / z_eig_mag) * (180 / np.pi)
+        # print("HERE is angle: ", angle)
+        if angle < self.angle_threshold :  # Adjust the threshold as needed
+            return True
+        return False
+
     #---Fork 3 called by centriod_finder---
     def kd_tree_PCA(self, n_clusters):
-        print("HERE is n_clusters in kd_tree_PCA: ", n_clusters)
-
         # print("HERE is txt dict: ", self.text_dict)
         """!@brief Performs PCA on the clusters in the mid z-slice on a KDTree across all z-slices' clusters"""
         if len(self.clustered_cloud_list):
@@ -402,7 +411,7 @@ class TreeFinder:
             #V stacks all pancakes verically, to give KDtree all points from all pancakes
             self.all_vpancakes = np.vstack(all_pancakes)
 
-            print("HERE is all_vpancakes shape: ", self.all_vpancakes.shape)
+            # print("HERE is all_vpancakes shape: ", self.all_vpancakes.shape)
             
             # print("HERE is self.mid_z_dict: ", self.mid_z_dict)
 
@@ -448,7 +457,7 @@ class TreeFinder:
                     max_y_index = np.argmax(all_y)
                     y_eig = fitted_comps[max_y_index]
 
-                    # print("HERE is clust_name in kd_tree_PCa: ", clust_name)
+                    print("HERE is clust_name in kd_tree_PCa: ", clust_name)
                     self.text_dict[clust_name]["x_eig"] = x_eig
                     self.text_dict[clust_name]["x_index"] = max_x_index
                     self.text_dict[clust_name]["y_eig"] = y_eig
@@ -482,8 +491,10 @@ class TreeFinder:
 
         curr_line = line * z_basis + centroid
         # print("HERE is curr_line: ", curr_line)
-        self.pub_line_list.append(curr_line)
-        # print("HERE is pub line list")
+
+        if self.is_vertical(z_axis):
+            self.pub_line_list.append(curr_line)
+            # print("HERE is pub line list")
 
 
 
@@ -506,6 +517,9 @@ class TreeFinder:
         if len(self.pub_line_list):
             # print("HERE is self.pub_line_list: ", self.pub_line_list)
             line_stacked = np.vstack(self.pub_line_list)
+
+
+
             line_cloud = make_pointcloud2_xyz32(header, line_stacked)
             self.pub_line.publish(line_cloud)
 
@@ -531,7 +545,7 @@ class TreeFinder:
                 
                 # Text scale/size (Z controls height of capital letters)
                 marker.scale.z = 0.15
-                
+
                 # Text color
                 marker.color.r = 0
                 marker.color.g = 0
