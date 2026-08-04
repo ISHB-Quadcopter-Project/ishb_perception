@@ -21,6 +21,8 @@ from geometry_msgs.msg import Point
 
 from common import *
 
+from geometry_msgs.msg import PoseStamped
+
 
 
 #TODO We want to do two things A) find poss trees B) sep class at least, goes up to poss tree, and estimates radius, and reonsiders dist from tree for cam, and reconsiders tree placements
@@ -43,6 +45,8 @@ class TreeFinder:
 
         self.pub_persisted = rospy.Publisher("PERSISTED", PointCloud2, queue_size = 10)
 
+        self.pub_to_go_pt = rospy.Publisher("TOGO", PointStamped, queue_size = 10)
+
         self.pub_text = rospy.Publisher('/TEXT', MarkerArray, queue_size=10)
 
         #Sub to cum cloud
@@ -51,8 +55,11 @@ class TreeFinder:
         self.cloud_section_two = None
 
         #Timer
-        rospy.Timer(rospy.Duration(0.1), self.on_timer)  # 10 Hz
-        rospy.Timer(rospy.Duration(3), self.persistence_timer)  # 1 Hz
+        self.on_timer_dur = 0.1
+        rospy.Timer(rospy.Duration(self.on_timer_dur), self.on_timer)  # 10 Hz
+
+        self.persistence_dur = 3
+        rospy.Timer(rospy.Duration(self.persistence_dur), self.persistence_timer)  # 1 Hz
 
         self.latest_cloud = None
         
@@ -100,10 +107,29 @@ class TreeFinder:
         self.kd_tree_PCA_done = False
 
         self.persistence_list = []
+        self.tol = 0.1
 
-        self.persistence_freq = 25
+        self.persistence_freq = 0
 
         self.pub_persisted_array = np.zeros(0)
+
+        self.max_pers_counts = self.persistence_dur / self.on_timer_dur
+        self.persisted_scores_weight = 1
+        self.norms_scores_weight = 1
+
+        #Odom var to hold the x,y,z odom data
+        self.latest_pos = None
+
+        self.sub = rospy.Subscriber("/Odometry", Odometry, self.odom_cb, queue_size = 10)
+        
+        #Flag to see if there is available odom data to check dist_to_goal
+        self.is_odom = False
+
+        # Topic super takes
+        self.pub = rospy.Publisher("/super/goal", PoseStamped, queue_size = 10) 
+
+        
+
 
 
         #TODO OLD STUFF: Tree Confirmation Parameters
@@ -119,6 +145,16 @@ class TreeFinder:
 
     
 #-------Subscriber Thread--------
+    def odom_cb(self, msg):
+        """!@brief Callback function for the /Odometry topic
+            @details Updates the latest odometry position and sets the is_odom flag to True. Odom data is stored in a list for the odom_watchdog to check if the drone is moving.
+            @note self.lock is used to ensure other areas of code using odom data don't get partial data, as this callback is in a separate thread
+            @param msg The Odometry message received from the /Odometry topic"""
+        
+        with self.lock:
+            self.latest_pos = msg.pose.pose.position
+            self.is_odom = True # latest_pos odom should be set by now
+
     def cloud_cb(self, msg):
         """!@brief Callback function for the /Cum_Cloud topic.
             @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder
@@ -216,113 +252,171 @@ class TreeFinder:
                     self.clustered_cloud_list.clear()
             #TODO  call cluster categorizing steps 2-4 funcs here
 
+    def centroid_finder(self, which, is_mid):
+            """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
+                @see is_line @see clustering @see kd_tree_PCA
+                @param which An integer value representing which pancake is to be clustered.
+                @todo return is artifact of e_array stuff"""
+    
+            # print("HERE is which inside of centriod findeer: ", which)
+            # print("proc cloud list[0]: " ,self.processed_cloud_list[0])
+            self.kd_tree_PCA_done = False
+            if len(self.processed_cloud_list) > which:
+                processed_cloud = self.processed_cloud_list[which]
+                if len(processed_cloud):
+                    labels, n_clusters = self.clustering(processed_cloud, which)
+    
+                    # self.centroid_list = np.zeros((n_clusters-1,3))
+                    if n_clusters > 0:
+                        # e_array = np.zeros((n_clusters-1, 6))
+                        self.clustered_cloud_list.append(self.xy[labels != -1])
+                        # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
+    
+                        for clustnum in range(n_clusters-1):
+                            curr_clust = self.xy[labels == clustnum]
+                            xmean = np.mean(curr_clust[:,0])
+                            ymean = np.mean(curr_clust[:,1])
+    
+                            #Getting relevant cluster info from eigen func
+                            hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
+    
+                            clust_name = f"Cluster {self.mid_count}"
+    
+                            #Populate mid_z_dict if at mid z-sclie
+                            if is_mid and not self.is_line(hor_rms, elongation_num):
+                                # print("HERE is curr_clsut: ", curr_clust)
+                                num_pts = curr_clust.shape[0]
+    
+                                if num_pts < 1000: #Checking if the cluster is absurd
+    
+                                    #TODO replace this call with the filtering func
+                                    # print("HERE is num of ptS: ", num_pts)
+                                    self.mid_z_dict[clust_name]["num_pts"] = num_pts
+                                    self.mid_z_dict[clust_name]["xmean"] = xmean
+                                    self.mid_z_dict[clust_name]["ymean"] = ymean
+    
+                                    #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
+                                    self.text_dict[clust_name]["hor_rms"] = hor_rms
+                                    self.text_dict[clust_name]["ver_rms"] = ver_rms
+                                    self.text_dict[clust_name]["xmean"] = xmean
+                                    self.text_dict[clust_name]["ymean"] = ymean
+                                    self.text_dict[clust_name]["elongation_num"] = elongation_num
+    
+                                    self.mid_count += 1
+                                    # print("HERE is mid_count: ", self.mid_count)
+                            
+    
+    
+    
+                                # print("HERE is mid_z_dict: ", self.mid_z_dict)
+    
+                                    #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
+                                    # e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
+    
+                                # print("HER is e_array shape: ", e_array.shape)
+                            #TODO if else statement for returned value for is big func ARTIFACT???
+    
+                        #TODO
+                        # print("HERE is count: ", count)
+    
+                        if which == self.pancake_stacks - 1: 
+                            # print("before calling kd_tree_PCA")
+                            self.kd_tree_PCA(self.mid_count) #Call #TODO filtering func, after for loop so dict is fully populated
+                            # print("after calling kd_tree_PCA")
+                        # return e_array
+                    return None
+    
     def persistence_timer(self, event):
         with self.lock:
             self.persistence()
             self.persistence_list.clear()
     def persistence(self):
         if len(self.persistence_list):
-            tol = 0.1
-
             vpersist = np.vstack(self.persistence_list)
-            print("vpersist shape: ", vpersist.shape)
+            print("HERE vpersist shape: ", vpersist.shape)
 
-            quantized = np.floor( vpersist / tol) * tol
+            quantized = np.floor( vpersist / self.tol) * self.tol
 
-            # qvpersist = np.column_stack((vpersist, quantized))
-
-            # print("qvpersist: ", qvpersist)
-
-            elements, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~50~,2)
-            print("elements: ", elements)
-
-            print("vpersist[inx]: ", vpersist[inx])
+            _, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~50~,2)
             
             frequencies = np.column_stack((vpersist[inx], counts))
             print("freq: ", frequencies)
+
+            #TODO make this the acutal reachable max like down in cost_map?
+            max_count = np.max(frequencies[:,2])
+            self.persistence_freq = max_count * 0.825
 
             persist_mask = frequencies[:,2] > self.persistence_freq
             persisted = frequencies[persist_mask]
             print("persisted: ", persisted)
 
+            self.cost_map(persisted)
+
             const_z_height = np.ones((persisted.shape[0], 1)) * 1.67
             self.pub_persisted_array = np.column_stack((persisted[:, 0:2], const_z_height))
-
             # print(self.pub_persisted_array)
-    
-    def centroid_finder(self, which, is_mid):
-        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
-            @see is_line @see clustering @see kd_tree_PCA
-            @param which An integer value representing which pancake is to be clustered.
-            @todo return is artifact of e_array stuff"""
 
-        # print("HERE is which inside of centriod findeer: ", which)
-        # print("proc cloud list[0]: " ,self.processed_cloud_list[0])
-        self.kd_tree_PCA_done = False
-        if len(self.processed_cloud_list) > which:
-            processed_cloud = self.processed_cloud_list[which]
-            if len(processed_cloud):
-                labels, n_clusters = self.clustering(processed_cloud, which)
+    def cost_map(self, persisted):
+        persisted_counts = persisted[:, 2]
+        persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight
+        print("HERE is count_scores: ", persisted_scores)
 
-                # self.centroid_list = np.zeros((n_clusters-1,3))
-                if n_clusters > 0:
-                    # e_array = np.zeros((n_clusters-1, 6))
-                    self.clustered_cloud_list.append(self.xy[labels != -1])
-                    # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
+        if self.is_odom:
+            drone_x = self.latest_pos.x
+            drone_y = self.latest_pos.y
 
-                    for clustnum in range(n_clusters-1):
-                        curr_clust = self.xy[labels == clustnum]
-                        xmean = np.mean(curr_clust[:,0])
-                        ymean = np.mean(curr_clust[:,1])
+            x_dist = persisted[:, 0] - drone_x
+            y_dist = persisted[:, 1] - drone_y
 
-                        #Getting relevant cluster info from eigen func
-                        hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
+            xy_dist = np.column_stack((x_dist, y_dist))
 
-                        clust_name = f"Cluster {self.mid_count}"
+            norms = np.linalg.norm(xy_dist, axis = 1)
+            norms_score = (norms/np.max(norms)) * self.norms_scores_weight #normalized to the max distance with what have
 
-                        #Populate mid_z_dict if at mid z-sclie
-                        if is_mid and not self.is_line(hor_rms, elongation_num):
-                            # print("HERE is curr_clsut: ", curr_clust)
-                            num_pts = curr_clust.shape[0]
+            print("HER is: ", norms_score)
 
-                            if num_pts < 1000: #Checking if the cluster is absurd
+            #Assesment, whichever linear combination is highest
+            assesment = persisted_scores - norms_score
+            print("HERE is asses: ", assesment)
 
-                                #TODO replace this call with the filtering func
-                                # print("HERE is num of ptS: ", num_pts)
-                                self.mid_z_dict[clust_name]["num_pts"] = num_pts
-                                self.mid_z_dict[clust_name]["xmean"] = xmean
-                                self.mid_z_dict[clust_name]["ymean"] = ymean
+            max_index = np.argmax(assesment)
+            print("HERE is max_indx: ", max_index)
 
-                                #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
-                                self.text_dict[clust_name]["hor_rms"] = hor_rms
-                                self.text_dict[clust_name]["ver_rms"] = ver_rms
-                                self.text_dict[clust_name]["xmean"] = xmean
-                                self.text_dict[clust_name]["ymean"] = ymean
-                                self.text_dict[clust_name]["elongation_num"] = elongation_num
+            print("HERE IS Where to go: ", persisted[max_index, 0:2])
+            self.to_go(persisted[max_index, 0:2])
 
-                                self.mid_count += 1
-                                # print("HERE is mid_count: ", self.mid_count)
-                        
+            #TODO call a func to go to place SUPER waypts
+
+    def to_go(self, to_go):
+        # print("Publishing now")
+        #Creating message to publish
+        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
+        #Rviz Point
+        point = PointStamped()
+        point.header = header
+        point.point.x = to_go[0]
+        point.point.y = to_go[1]
+        point.point.z = 2.67
+
+        self.pub_to_go_pt.publish(point)
+
+        #SUPER
+        # self.msg = PoseStamped() 
+        # self.msg.header.stamp = rospy.Time.now() #time stamp for msg
+        # self.msg.header.frame_id = "world" #frame of message
+
+        # # print(self.waypt_index)
+        # self.msg.pose.position.x = self.waypts[self.waypt_index]["x"]
+        # self.msg.pose.position.y = self.waypts[self.waypt_index]["y"]
+        # self.msg.pose.position.z = self.waypts[self.waypt_index]["z"]
+        # self.msg.pose.orientation.w = 1.0
+
+        # self.pub.publish(self.msg)
 
 
 
-                            # print("HERE is mid_z_dict: ", self.mid_z_dict)
 
-                                #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
-                                # e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
-
-                            # print("HER is e_array shape: ", e_array.shape)
-                        #TODO if else statement for returned value for is big func ARTIFACT???
-
-                    #TODO
-                    # print("HERE is count: ", count)
-
-                    if which == self.pancake_stacks - 1: 
-                        # print("before calling kd_tree_PCA")
-                        self.kd_tree_PCA(self.mid_count) #Call #TODO filtering func, after for loop so dict is fully populated
-                        # print("after calling kd_tree_PCA")
-                    # return e_array
-                return None
+        #TODO pass in the persisted numpy array. Then save the normalized counts as persisted scores. Then compute the distance from where rn (from odom) to the centroid of mid z-slice.
 
     #---Fork 1 called by centriod_finder---
     def clustering(self, points, which): 
