@@ -28,6 +28,7 @@ from common import *
 #When state 3 happens (assecnetion), that's when we know for certain the rad of the tree, and can accurately place waypt,next waypoint can b determined
 
 class TreeFinder:
+    """!@brief Still in development!"""
     def __init__(self): 
         self.lock = threading.Lock()
 
@@ -40,6 +41,8 @@ class TreeFinder:
 
         self.pub_not_line = rospy.Publisher("NOT_LINES", PointCloud2, queue_size = 10)
 
+        self.pub_persisted = rospy.Publisher("PERSISTED", PointCloud2, queue_size = 10)
+
         self.pub_text = rospy.Publisher('/TEXT', MarkerArray, queue_size=10)
 
         #Sub to cum cloud
@@ -49,6 +52,7 @@ class TreeFinder:
 
         #Timer
         rospy.Timer(rospy.Duration(0.1), self.on_timer)  # 10 Hz
+        rospy.Timer(rospy.Duration(3), self.persistence_timer)  # 1 Hz
 
         self.latest_cloud = None
         
@@ -95,6 +99,12 @@ class TreeFinder:
 
         self.kd_tree_PCA_done = False
 
+        self.persistence_list = []
+
+        self.persistence_freq = 25
+
+        self.pub_persisted_array = np.zeros(0)
+
 
         #TODO OLD STUFF: Tree Confirmation Parameters
 
@@ -112,6 +122,7 @@ class TreeFinder:
     def cloud_cb(self, msg):
         """!@brief Callback function for the /Cum_Cloud topic.
             @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder
+            @param msg The PointCloud2 message received from the /Cum_Cloud
             @see cut_cloud"""
         self.latest_cloud = cloud_to_xyz(msg)
 
@@ -122,9 +133,9 @@ class TreeFinder:
                 self.processed_cloud_list.append(processed_cloud)
 
     def cut_cloud(self, uncut_cloud, z_mid):
-        """!@brief Cuts a point cloud to a specified z-range and returns x,y coordinates inside range.
+        """!@brief Cuts a point cloud to a specified z-range and returns unique x,y coordinates inside range.
             @details A boolean for the specified z-range is created, to "cut" the cloud. A bit-packed key is created for the x,y coordinates, to find make finding unique x,y coordinates faster. This part is similar to Accumulator.Accumulator.down_cloud
-            @param uncut_cloud The point cloud to cut
+            @param uncut_cloud The numpy array point cloud to cut
             @param z_mid The middle height of the z-range to cut
             @return A numpy array of shape (N, 2) containing the x,y coordinates of the points in the specified z-range"""
         # print("HERE is pre processed z: ", uncut_cloud[:,2])
@@ -155,9 +166,11 @@ class TreeFinder:
         return cut_cloud[first,0:2] 
 
 
+#-------Timer Threads (that sub and pub both depend on)-----
     def on_timer(self,event):
         """!@brief Timer callback to call centroid_finder on each z-slices. Calls publ too.
             @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice. If kd_tree_PCA is done, based on a flag, then relevant list and dicts for this class's operations are cleared to ensure data is refreshed.
+            @param event An object of TimerEvent, automatically created every time rospy.Timer fires.
             @see centroid_finder"""
         i = 1
 
@@ -168,7 +181,7 @@ class TreeFinder:
                 mid_num = math.floor(half + 0.5)
                 for pancake_num in range(self.pancake_stacks):
                     is_mid = False
-                    print("HERE is mid_num: ", mid_num)
+                    # print("HERE is mid_num: ", mid_num)
 
                     if i == mid_num: #Checking if at the mid z-slice
                         is_mid = True
@@ -203,9 +216,44 @@ class TreeFinder:
                     self.clustered_cloud_list.clear()
             #TODO  call cluster categorizing steps 2-4 funcs here
 
+    def persistence_timer(self, event):
+        with self.lock:
+            self.persistence()
+            self.persistence_list.clear()
+    def persistence(self):
+        if len(self.persistence_list):
+            tol = 0.1
+
+            vpersist = np.vstack(self.persistence_list)
+            print("vpersist shape: ", vpersist.shape)
+
+            quantized = np.floor( vpersist / tol) * tol
+
+            # qvpersist = np.column_stack((vpersist, quantized))
+
+            # print("qvpersist: ", qvpersist)
+
+            elements, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~50~,2)
+            print("elements: ", elements)
+
+            print("vpersist[inx]: ", vpersist[inx])
+            
+            frequencies = np.column_stack((vpersist[inx], counts))
+            print("freq: ", frequencies)
+
+            persist_mask = frequencies[:,2] > self.persistence_freq
+            persisted = frequencies[persist_mask]
+            print("persisted: ", persisted)
+
+            const_z_height = np.ones((persisted.shape[0], 1)) * 1.67
+            self.pub_persisted_array = np.column_stack((persisted[:, 0:2], const_z_height))
+
+            # print(self.pub_persisted_array)
+    
     def centroid_finder(self, which, is_mid):
-        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped and is reletively vertical, then saves relevant info for kd_tree_PCA and also publishing text.
+        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
             @see is_line @see clustering @see kd_tree_PCA
+            @param which An integer value representing which pancake is to be clustered.
             @todo return is artifact of e_array stuff"""
 
         # print("HERE is which inside of centriod findeer: ", which)
@@ -270,9 +318,9 @@ class TreeFinder:
                     # print("HERE is count: ", count)
 
                     if which == self.pancake_stacks - 1: 
-                        print("before calling kd_tree_PCA")
+                        # print("before calling kd_tree_PCA")
                         self.kd_tree_PCA(self.mid_count) #Call #TODO filtering func, after for loop so dict is fully populated
-                        print("after calling kd_tree_PCA")
+                        # print("after calling kd_tree_PCA")
                     # return e_array
                 return None
 
@@ -424,7 +472,7 @@ class TreeFinder:
             # print("HERE is self.mid_z_dict: ", self.mid_z_dict)
 
             if n_clusters > 0 and len(self.mid_z_dict):
-                print("INSIDE kd_tree_PCA, after checking n_clusters and mid_z_dict")
+                # print("INSIDE kd_tree_PCA, after checking n_clusters and mid_z_dict")
                 for i in range(n_clusters): #TODO mayber change back to -1???
                     tree = KDTree(self.all_vpancakes, leaf_size =self.leaf_size)
                     clust_name = f"Cluster {i}"
@@ -467,7 +515,7 @@ class TreeFinder:
                     y_eig = fitted_comps[max_y_index]
 
                     # print("HERE is clust_name in kd_tree_PCa: ", clust_name)
-                    print("INSIDE kd_tree_PCA")
+                    # print("INSIDE kd_tree_PCA")
 
                     self.text_dict[clust_name]["x_eig"] = x_eig
                     self.text_dict[clust_name]["x_index"] = max_x_index
@@ -480,36 +528,40 @@ class TreeFinder:
 
                     # print("HERE is max_z_index: ", max_z_index)
                     # print("HERE is z_eig: ", z_eig, "\n")
-                    self.PCA_make_lines(z_eig, centriod)
 
-                    # for eig_vec in fitted_comps:
-                    #     if eig_vec[2] != 
-                    #         print("EIG VEC: ", eig_vec)
-                    #         self.PCA_make_lines(eig_vec,centriod)
+                    is_vertical_flag = self.is_vertical(z_eig)
+                    if is_vertical_flag:
+                        centriod_xy = np.array([self.mid_z_dict[clust_name]["xmean"], self.mid_z_dict[clust_name]["ymean"]])
+                        self.persistence_list.append(centriod_xy)
 
-                    # self.PCA_zaxis_list.append(fitted_comps[0] + centriod)
-                    # print("HERE is pca axis's: ", fitted_comps)
+
+                        #TODO put centroids in a list, then make another func to be called in on_timer. This func is to make a numpy array from this list and vstack it. Use the vectorized np.unique on this, to get jus tthe uniq centriods. Then use this as 
+                        #a guide for bool mask.sum() to count how many times it in there
+
+                        #Or use np.unqie but with return_counts = True. use vectozied np.uniqe though
+
+                    self.PCA_make_lines(z_eig, centriod, is_vertical_flag)
 
                 self.kd_tree_PCA_done = True
             else:
                 print("No clusters found in mid z-slice, or mid_z_dict is empty")
                 self.kd_tree_PCA_done = False
 
-    def PCA_make_lines(self, z_axis,centroid):
-        """!@brief """
+    def PCA_make_lines(self, z_axis, centroid, is_vertical_flag):
+        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
         z_axis = abs(z_axis)
         z_basis = z_axis / np.linalg.norm(z_axis)
 
+        #Creates a line of length 10, with 20 points. Adding a new axis makes it a col vector, to allow for broadcasting.
         length = 10
         line = np.linspace(0,length,20)[:,np.newaxis]
-        # print("line shape: ", line.shape)
-        # print("line: ", line)
-        # print("line z_basis: ", z_basis)
 
+        #Performs broadcasting to the (20,1) and (3,) vectors, to allow for use of vectozied element-wise multiplication. Centroid it added so the line starts at the correct tree.
         curr_line = line * z_basis + centroid
         # print("HERE is curr_line: ", curr_line)
 
-        if self.is_vertical(z_axis):
+        #Whether the line passing verticality test, append it to the corresponding publishing list
+        if is_vertical_flag: 
             self.pub_line_list.append(curr_line)
             # print("HERE is pub line list")
         else:
@@ -555,8 +607,12 @@ class TreeFinder:
             not_line_cloud = make_pointcloud2_xyz32(header, not_line_stacked)
             self.pub_not_line.publish(not_line_cloud)
 
+        if self.pub_persisted_array.shape != (0,):
+            persisted_dots = make_pointcloud2_xyz32(header, self.pub_persisted_array)
+            self.pub_persisted.publish(persisted_dots)
+
         #TODO check if the text dict is len, then publish
-        print("HERE is if kd_tree_PCA_done: ", self.kd_tree_PCA_done)
+        # print("HERE is if kd_tree_PCA_done: ", self.kd_tree_PCA_done)
         if len(self.text_dict) > 0:
 
             marker_array = MarkerArray()
@@ -586,9 +642,9 @@ class TreeFinder:
                 marker.color.b = 1.0
                 marker.color.a = 1.0
 
-                print("INSIDE PUBLISH")
+                # print("INSIDE PUBLISH")
                 # print(f"HERE is self.text_dict[{clus_num}]: ", self.text_dict[clus_num])
-                print("\n")
+                # print("\n")
 
                 hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
                 ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)

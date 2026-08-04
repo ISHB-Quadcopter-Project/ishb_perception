@@ -97,7 +97,8 @@ class Accumulator:
 #-------Publisher Thread--------
     def on_timer(self,event):
         """!@brief Timer callback function that is called every 0.1 seconds. Calls make_cloud and publ.
-            @details This func checks if there is odometry data and if numpy array from make_cloud was populated
+            @details This func checks if there is odometry data and if numpy array from make_cloud was populated.
+            @param event An object of TimerEvent, automatically created every time rospy.Timer fires.
             @see odom_cb @see make_cloud @see publ"""
         #if odometry and unique cloud window is open, then publish
         if self.is_odom and self.make_cloud():
@@ -148,6 +149,7 @@ class Accumulator:
             @note The bit shifting operation << is vectorized for a numpy array, performing it element wise. This means each pos bin coordinate (x, y, or z) in the array is shifted without np.unique() having to compare rows
             , making it faster. Additionally, the | operation is vectorized too.
             @note CPU usage is droppped from 39.5% to 7% using the alogirthm above
+            @param A point cloud as a numpy array
             @return A numpy array of shape (N, 3) containing the XYZ coordinates of the downsampled point cloud"""
         
         #This get's the bin num, for assigning bin indexes to each downsampled voxel box
