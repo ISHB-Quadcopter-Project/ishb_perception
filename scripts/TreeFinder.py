@@ -38,6 +38,8 @@ class TreeFinder:
 
         self.pub_line = rospy.Publisher("LINES", PointCloud2, queue_size = 10)
 
+        self.pub_not_line = rospy.Publisher("NOT_LINES", PointCloud2, queue_size = 10)
+
         self.pub_text = rospy.Publisher('/TEXT', MarkerArray, queue_size=10)
 
         #Sub to cum cloud
@@ -52,7 +54,7 @@ class TreeFinder:
         
         self.pancake_stacks = 7
         self.pancake_start = round(5 * 0.067, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
-        self.pancake_gap = round(2* 0.067, 5) #TODO This has to be small for new alg
+        self.pancake_gap = round(1* 0.067, 5) #TODO This has to be small for new alg
         self.pancake_thickness = round(3 * 0.067, 5)
         self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
         self.xy = None
@@ -84,6 +86,7 @@ class TreeFinder:
         self.clustered_cloud_list = deque(maxlen = 50)
         self.all_vpancakes = None
         self.pub_line_list= []
+        self.pub_not_line_list= []
         self.leaf_size = 80
 
         self.text_dict = defaultdict(dict)
@@ -154,17 +157,18 @@ class TreeFinder:
 
     def on_timer(self,event):
         """!@brief Timer callback to call centroid_finder on each z-slices. Calls publ too.
-            @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice.
+            @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice. If kd_tree_PCA is done, based on a flag, then relevant list and dicts for this class's operations are cleared to ensure data is refreshed.
             @see centroid_finder"""
         i = 1
 
         self.mid_count = 0 #reset the mid_count for kd_tree_PCA
         with self.lock:
             if len(self.processed_cloud_list):
-                mid_num = round(self.pancake_stacks / 2)
+                half = self.pancake_stacks / 2
+                mid_num = math.floor(half + 0.5)
                 for pancake_num in range(self.pancake_stacks):
                     is_mid = False
-                    # print("HERE is mid_num: ", mid_num)
+                    print("HERE is mid_num: ", mid_num)
 
                     if i == mid_num: #Checking if at the mid z-slice
                         is_mid = True
@@ -193,13 +197,14 @@ class TreeFinder:
                 if self.kd_tree_PCA_done == True:
                     self.publ()
                     self.pub_line_list.clear()
+                    self.pub_not_line_list.clear()
                     self.text_dict.clear()
                     self.mid_z_dict.clear() #Clear dict for mid slice, before poulate again with new clustering
                     self.clustered_cloud_list.clear()
             #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
-        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saving relevant info for kd_tree_PCA and also publishing text.
+        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped and is reletively vertical, then saves relevant info for kd_tree_PCA and also publishing text.
             @see is_line @see clustering @see kd_tree_PCA
             @todo return is artifact of e_array stuff"""
 
@@ -384,20 +389,14 @@ class TreeFinder:
 
         return False
 
-    def is_vertical(self, z_eig):
-        dot = np.dot(z_eig, np.array([0,0,1]))
-        z_eig_mag = np.linalg.norm(z_eig)
-        angle = np.arccos(dot / z_eig_mag) * (180 / np.pi)
-        # print("HERE is angle: ", angle)
-        if angle < self.angle_threshold :  # Adjust the threshold as needed
-            return True
-        return False
-
     #---Fork 3 called by centriod_finder---
     def kd_tree_PCA(self, n_clusters):
+        """!@brief Creates kd_trees starting at the centroids of the mid-zlice to link clusters across z-slices, then performs PCA.
+            @detail To clarify, the kd_trees is made only from clustered points in all z-slices. This is done to increase resistance to noise for when PCA is applied to these point neightborhoods
+            @see PCA_make_lines"""
+
         # print("HERE is txt dict: ", self.text_dict)
         self.kd_tree_PCA_done = False
-        """!@brief Performs PCA on the clusters in the mid z-slice on a KDTree across all z-slices' clusters"""
         if len(self.clustered_cloud_list) > 0:
             # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
             # print("HERE is type of procecllist: ", self.processed_cloud_list.type())
@@ -496,8 +495,8 @@ class TreeFinder:
                 print("No clusters found in mid z-slice, or mid_z_dict is empty")
                 self.kd_tree_PCA_done = False
 
-
     def PCA_make_lines(self, z_axis,centroid):
+        """!@brief """
         z_axis = abs(z_axis)
         z_basis = z_axis / np.linalg.norm(z_axis)
 
@@ -513,8 +512,19 @@ class TreeFinder:
         if self.is_vertical(z_axis):
             self.pub_line_list.append(curr_line)
             # print("HERE is pub line list")
+        else:
+            self.pub_not_line_list.append(curr_line)
 
-
+    def is_vertical(self, z_eig):
+        """!@brief Determines if the angle of the Z Principal Component overcedes a certain threshold.
+            @return A flag whether the angle threshold is passed or not."""
+        dot = np.dot(z_eig, np.array([0,0,1]))
+        z_eig_mag = np.linalg.norm(z_eig)
+        angle = np.arccos(dot / z_eig_mag) * (180 / np.pi)
+        # print("HERE is angle: ", angle)
+        if angle < self.angle_threshold :  # Adjust the threshold as needed
+            return True
+        return False
 
   
 
@@ -523,7 +533,8 @@ class TreeFinder:
 
     #-------Publishing Thread------
 
-    def publ(self):#TODO publish the PCA z-axis???
+    def publ(self):
+        """!@brief"""
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
         if self.all_vpancakes.any() != None:
             #TODO uncomment and fix the can't concatinate error
@@ -531,15 +542,18 @@ class TreeFinder:
             # stacked_pub_list = np.vstack(self.publish_list)
             cluster_cloud = make_pointcloud2_xyz32(header, self.all_vpancakes)
             self.pub_cloud.publish(cluster_cloud)
+
         # print("Before if state here the pub linke ist: ", self.pub_line_list)
         if len(self.pub_line_list):
             # print("HERE is self.pub_line_list: ", self.pub_line_list)
             line_stacked = np.vstack(self.pub_line_list)
-
-
-
             line_cloud = make_pointcloud2_xyz32(header, line_stacked)
             self.pub_line.publish(line_cloud)
+
+        if len(self.pub_not_line_list):
+            not_line_stacked = np.vstack(self.pub_not_line_list)
+            not_line_cloud = make_pointcloud2_xyz32(header, not_line_stacked)
+            self.pub_not_line.publish(not_line_cloud)
 
         #TODO check if the text dict is len, then publish
         print("HERE is if kd_tree_PCA_done: ", self.kd_tree_PCA_done)
@@ -573,7 +587,7 @@ class TreeFinder:
                 marker.color.a = 1.0
 
                 print("INSIDE PUBLISH")
-                print(f"HERE is self.text_dict[{clus_num}]: ", self.text_dict[clus_num])
+                # print(f"HERE is self.text_dict[{clus_num}]: ", self.text_dict[clus_num])
                 print("\n")
 
                 hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
