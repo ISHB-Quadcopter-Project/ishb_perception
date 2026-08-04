@@ -126,7 +126,7 @@ class TreeFinder:
         self.is_odom = False
 
         # Topic super takes
-        self.pub = rospy.Publisher("/super/goal", PoseStamped, queue_size = 10) 
+        self.pub_super = rospy.Publisher("/super/goal", PoseStamped, queue_size = 10) 
 
         
 
@@ -401,17 +401,16 @@ class TreeFinder:
         self.pub_to_go_pt.publish(point)
 
         #SUPER
-        # self.msg = PoseStamped() 
-        # self.msg.header.stamp = rospy.Time.now() #time stamp for msg
-        # self.msg.header.frame_id = "world" #frame of message
+        msg = PoseStamped() 
+        msg.header = header
 
-        # # print(self.waypt_index)
-        # self.msg.pose.position.x = self.waypts[self.waypt_index]["x"]
-        # self.msg.pose.position.y = self.waypts[self.waypt_index]["y"]
-        # self.msg.pose.position.z = self.waypts[self.waypt_index]["z"]
-        # self.msg.pose.orientation.w = 1.0
+        # print(self.waypt_index)
+        msg.pose.position.x = to_go[0]
+        msg.pose.position.y = to_go[1]
+        msg.pose.position.z = 0.25
+        msg.pose.orientation.w = 1.0
 
-        # self.pub.publish(self.msg)
+        self.pub_super.publish(msg)
 
 
 
