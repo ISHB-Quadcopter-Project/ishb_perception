@@ -107,12 +107,13 @@ class TreeFinder:
         self.kd_tree_PCA_done = False
 
         self.persistence_list = []
-        self.tol = 0.1
+        self.tol = 0.3
 
         self.persistence_freq = 0
 
         self.pub_persisted_array = np.zeros(0)
 
+        #Maximum possible counts is the duration of persistence, divided by how often you add to the persistence_list
         self.max_pers_counts = self.persistence_dur / self.on_timer_dur
         self.persisted_scores_weight = 1
         self.norms_scores_weight = 1
@@ -277,6 +278,7 @@ class TreeFinder:
     
                         for clustnum in range(n_clusters-1):
                             curr_clust = self.xy[labels == clustnum]
+                            # print("\n------HERE is curr_clust: ", curr_clust, "\n")
                             xmean = np.mean(curr_clust[:,0])
                             ymean = np.mean(curr_clust[:,1])
     
@@ -328,49 +330,57 @@ class TreeFinder:
                             # print("after calling kd_tree_PCA")
                         # return e_array
                     return None
-    
+
     def persistence_timer(self, event):
+        """!@brief This function is called every self.persistence_dur seconds. Calls persistence().
+            @see persistence"""
         with self.lock:
             self.persistence()
-            self.persistence_list.clear()
+            self.persistence_list.clear() #Clear the list, so new new persistence data is refreshed every self.persistence_dur sec
     def persistence(self):
         if len(self.persistence_list):
+            #Vertically stack persistence_list, (N,2). Col's x, y centroids
             vpersist = np.vstack(self.persistence_list)
             print("HERE vpersist shape: ", vpersist.shape)
 
+            #Quantize the centroids, to allow for similarity checks later
             quantized = np.floor( vpersist / self.tol) * self.tol
 
-            _, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~50~,2)
-            
+            #Find the uniqe centroids that appear over self.persistence_dur. Also get the # times appears, for persistence checking. Done on quantized centroids to avoid high precision dec nums tricking persistence.
+            _, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~100~,2)
+
+            #Frequencies is of shape (N,3). Col's x, y, count of unique centroids
             frequencies = np.column_stack((vpersist[inx], counts))
             print("freq: ", frequencies)
 
-            #TODO make this the acutal reachable max like down in cost_map?
+            #Finding the unique centroid with the highest count. #TODO May replace with highest possible count in self.persistence_dur.
             max_count = np.max(frequencies[:,2])
-            self.persistence_freq = max_count * 0.825
+            self.persistence_freq = max_count * 0.825 #This is our count threshold
 
+            #Construting a boolean mask of counts that pass our count threshold. This is applied to frequencies to get the "persisted" centriods.
             persist_mask = frequencies[:,2] > self.persistence_freq
             persisted = frequencies[persist_mask]
             print("persisted: ", persisted)
 
-            #TODO make a func that checks if persisted alr in an all global bookkeeping list, and then pass that into cost_map
-            # qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, counts))
-            pquantized = np.floor(persisted[:,0:2] / self.tol) * self.tol
-            qpersisted = np.column_stack((pquantized, persisted[:,2]))
+            #Quantizing persisted to allow for more silimarity checks for bookkeeping
+            qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, persisted[:,2])) #Adding the count col. back on after quantization
 
-            #TODO check is numpy array of pt alr been at in qpersisted, if yes then mask qpersisted so not have them
+            #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
             if self.qbeen.size > 0:
                 print("HERE is self.qbeen: ", self.qbeen)
-                notin_mask = np.isin(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1)
+                #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
+                notin_mask = np.isin(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows
+
+                #Ensuring that qpersisted, and persisted centriods are ones not visited before. Reminder: (N,3). Col's x, y, count.
                 qpersisted = qpersisted[notin_mask]
                 persisted = persisted[notin_mask]
-                
-
+    
             self.persist_bookkeeping(qpersisted, persisted)
 
             # print("HERE is qpersisted: ", qpersisted)
+            #Filtering self.all_persisted_array with centroids alreadly visited. This ensures a global list with only unvisited places is given to cost_map.
             if self.qbeen.size > 0:
-                quantized_allp = np.floor( self.all_persisted_array / self.tol) * self.tol
+                quantized_allp = np.floor(self.all_persisted_array / self.tol) * self.tol
                 notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
                 self.all_persisted_array = self.all_persisted_array[notin_mask]
 
@@ -385,20 +395,24 @@ class TreeFinder:
             # print(self.pub_persisted_array)
     
     def persist_bookkeeping(self, qpersisted, persisted):
+        """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to"""
+        #self.all_persisted_array is a global persisted numpy array. Reminder: (N,3). Col's x, y, count.
         if self.all_persisted_array.shape == (0,):
             self.all_persisted_array = persisted
-        else:    
-            notin_mask = np.isin(qpersisted[:,0:2], self.all_persisted_array, invert = True).all(axis = 1)
+        else:
+            #Checking if quantized persisted are alreadly in quantized self.all_persisted_array. Note: We use quantized since we are doing simliarity checks.
+            notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array / self.tol) * self.tol, invert = True).all(axis = 1)
             if qpersisted[:,0:2][notin_mask].shape != (0,):
                 print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
-                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask]))
+                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
         print("HERE is self.all_persisted_array: ", self.all_persisted_array)
         
 
     def cost_map(self, persisted_array):
+        """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
         persisted_counts = persisted_array[:, 2]
-        persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight
+        persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
         # print("HERE is count_scores: ", persisted_scores)
 
         if self.is_odom:
@@ -411,27 +425,25 @@ class TreeFinder:
             xy_dist = np.column_stack((x_dist, y_dist))
 
             norms = np.linalg.norm(xy_dist, axis = 1)
-            norms_score = (norms/np.max(norms)) * self.norms_scores_weight #normalized to the max distance with what have
-
-            # print("HER is: ", norms_score)
+            norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
+            # print("HER is norm_score: ", norms_score)
 
             #Assesment, whichever linear combination is highest
             assesment = persisted_scores - norms_score
             # print("HERE is asses: ", assesment)
 
+            #Finding the index of the max_score, this will be the tree we go to
             max_index = np.argmax(assesment)
             # print("HERE is max_indx: ", max_index)
-
             print("HERE IS Where to go: ", persisted_array[max_index, 0:2])
-            to_go = persisted_array[max_index, 0:2]
+            to_go = persisted_array[max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
             self.to_go(to_go)
 
             self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
 
-            #TODO call a func to go to place SUPER waypts
-
     def to_go(self, to_go):
-        # print("Publishing now")
+        """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
+            @details Notice that to_go is not quantized. We want maximum precision to avoid collision."""
         #Creating message to publish
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
         #Rviz Point
@@ -456,11 +468,9 @@ class TreeFinder:
         self.pub_super.publish(msg)
 
     def dist_to_goal(self, to_go):
-        """!@brief Calculates the distance from the current odometry position to the goal waypoint
-            @details This function is called by the run function to check if the drone has reached the current waypoint
-            @param odom The current odometry position
-            @see publ"""
-        # print("DIST ODOM: ", odom, "\n")
+        """!@brief Calculates the distance from the current odometry position to the place to go to.
+            @details """
+        #Quantizing the centroid to go to, to allow for putting this in self.qbeen
         qto_go = np.floor(to_go / self.tol) * self.tol
 
         drone_x = self.latest_pos.x
@@ -472,6 +482,8 @@ class TreeFinder:
         squared_sum = pow(dist_x, 2) + pow(dist_y, 2)
 
         distance = math.sqrt(squared_sum)
+
+        #If the to_go has been reached, then add qto_go 
         # print("D: ", distance)
         if distance < 1:
             # print("waypt reached")
@@ -569,6 +581,10 @@ class TreeFinder:
     def eigen(self, curr_clust, xmean, ymean):
             """!@brief Calculates the eigenvalues and eigenvectors of a cluster from the covariance matrix.
                 @return The horizontal RMS, vertical RMS, and elongation number of the cluster."""
+            # print("\n------INSIDE EIGEN------")
+            # print("xmean: ", xmean)
+            # print("ymean: ", ymean, "\n")
+        
             normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
             #  print("HERE is normalized shape: ", normalized.shape)
     
@@ -695,6 +711,7 @@ class TreeFinder:
 
                     is_vertical_flag = self.is_vertical(z_eig)
                     if is_vertical_flag:
+                        #Setting up list of centriods for persistence
                         centriod_xy = np.array([self.mid_z_dict[clust_name]["xmean"], self.mid_z_dict[clust_name]["ymean"]])
                         self.persistence_list.append(centriod_xy)
 
