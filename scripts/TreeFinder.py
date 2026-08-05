@@ -355,19 +355,27 @@ class TreeFinder:
 
             #TODO make a func that checks if persisted alr in an all global bookkeeping list, and then pass that into cost_map
             # qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, counts))
-            qpersisted = np.floor(persisted[:,0:2] / self.tol) * self.tol
-            qpersisted = np.column_stack((qpersisted, persisted[:,2]))
+            pquantized = np.floor(persisted[:,0:2] / self.tol) * self.tol
+            qpersisted = np.column_stack((pquantized, persisted[:,2]))
 
             #TODO check is numpy array of pt alr been at in qpersisted, if yes then mask qpersisted so not have them
-            if self.qbeen.shape != (0,):
+            if self.qbeen.size > 0:
                 print("HERE is self.qbeen: ", self.qbeen)
-                notin_mask = np.isn(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1)
+                notin_mask = np.isin(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1)
                 qpersisted = qpersisted[notin_mask]
+                persisted = persisted[notin_mask]
                 
 
-            self.persist_bookkeeping(qpersisted)
+            self.persist_bookkeeping(qpersisted, persisted)
 
             # print("HERE is qpersisted: ", qpersisted)
+            if self.qbeen.size > 0:
+                quantized_allp = np.floor( self.all_persisted_array / self.tol) * self.tol
+                notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
+                self.all_persisted_array = self.all_persisted_array[notin_mask]
+
+                print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array)
+
             self.cost_map(self.all_persisted_array)
 
 
@@ -376,46 +384,46 @@ class TreeFinder:
             self.pub_persisted_array = np.column_stack((persisted[:, 0:2], const_z_height))
             # print(self.pub_persisted_array)
     
-    def persist_bookkeeping(self, qpersisted):
+    def persist_bookkeeping(self, qpersisted, persisted):
         if self.all_persisted_array.shape == (0,):
-            self.all_persisted_array = qpersisted
+            self.all_persisted_array = persisted
         else:    
             notin_mask = np.isin(qpersisted[:,0:2], self.all_persisted_array, invert = True).all(axis = 1)
             if qpersisted[:,0:2][notin_mask].shape != (0,):
                 print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
-                self.all_persisted_array = np.vstack((self.all_persisted_array, qpersisted[notin_mask]))
+                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask]))
 
         print("HERE is self.all_persisted_array: ", self.all_persisted_array)
         
 
-    def cost_map(self, persisted):
-        persisted_counts = persisted[:, 2]
+    def cost_map(self, persisted_array):
+        persisted_counts = persisted_array[:, 2]
         persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight
-        print("HERE is count_scores: ", persisted_scores)
+        # print("HERE is count_scores: ", persisted_scores)
 
         if self.is_odom:
             drone_x = self.latest_pos.x
             drone_y = self.latest_pos.y
 
-            x_dist = persisted[:, 0] - drone_x
-            y_dist = persisted[:, 1] - drone_y
+            x_dist = persisted_array[:, 0] - drone_x
+            y_dist = persisted_array[:, 1] - drone_y
 
             xy_dist = np.column_stack((x_dist, y_dist))
 
             norms = np.linalg.norm(xy_dist, axis = 1)
             norms_score = (norms/np.max(norms)) * self.norms_scores_weight #normalized to the max distance with what have
 
-            print("HER is: ", norms_score)
+            # print("HER is: ", norms_score)
 
             #Assesment, whichever linear combination is highest
             assesment = persisted_scores - norms_score
-            print("HERE is asses: ", assesment)
+            # print("HERE is asses: ", assesment)
 
             max_index = np.argmax(assesment)
-            print("HERE is max_indx: ", max_index)
+            # print("HERE is max_indx: ", max_index)
 
-            print("HERE IS Where to go: ", persisted[max_index, 0:2])
-            to_go = persisted[max_index, 0:2]
+            print("HERE IS Where to go: ", persisted_array[max_index, 0:2])
+            to_go = persisted_array[max_index, 0:2]
             self.to_go(to_go)
 
             self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
@@ -453,6 +461,7 @@ class TreeFinder:
             @param odom The current odometry position
             @see publ"""
         # print("DIST ODOM: ", odom, "\n")
+        qto_go = np.floor(to_go / self.tol) * self.tol
 
         drone_x = self.latest_pos.x
         drone_y = self.latest_pos.y
@@ -466,10 +475,12 @@ class TreeFinder:
         # print("D: ", distance)
         if distance < 1:
             # print("waypt reached")
-            if self.qbeen == (0,):
-                self.qbeen = to_go
+            if self.qbeen.size > 0:
+                print("I AM NOT HAVING: ", self.qbeen)
+                self.qbeen = np.vstack((self.qbeen, qto_go))
             else:
-                self.qbeen = np.vstack((self.qbeen, to_go))
+                print("I AM HAVING self.qbeen: ", self.qbeen)
+                self.qbeen = qto_go
 
 
 
