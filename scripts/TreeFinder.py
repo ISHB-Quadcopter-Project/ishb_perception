@@ -117,6 +117,9 @@ class TreeFinder:
         self.persisted_scores_weight = 1
         self.norms_scores_weight = 1
 
+        self.all_persisted_array = np.zeros(0)
+        self.qbeen = np.zeros(0)
+
         #Odom var to hold the x,y,z odom data
         self.latest_pos = None
 
@@ -350,11 +353,40 @@ class TreeFinder:
             persisted = frequencies[persist_mask]
             print("persisted: ", persisted)
 
-            self.cost_map(persisted)
+            #TODO make a func that checks if persisted alr in an all global bookkeeping list, and then pass that into cost_map
+            # qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, counts))
+            qpersisted = np.floor(persisted[:,0:2] / self.tol) * self.tol
+            qpersisted = np.column_stack((qpersisted, persisted[:,2]))
 
+            #TODO check is numpy array of pt alr been at in qpersisted, if yes then mask qpersisted so not have them
+            if self.qbeen.shape != (0,):
+                print("HERE is self.qbeen: ", self.qbeen)
+                notin_mask = np.isn(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1)
+                qpersisted = qpersisted[notin_mask]
+                
+
+            self.persist_bookkeeping(qpersisted)
+
+            # print("HERE is qpersisted: ", qpersisted)
+            self.cost_map(self.all_persisted_array)
+
+
+            #Publishing stuff:
             const_z_height = np.ones((persisted.shape[0], 1)) * 1.67
             self.pub_persisted_array = np.column_stack((persisted[:, 0:2], const_z_height))
             # print(self.pub_persisted_array)
+    
+    def persist_bookkeeping(self, qpersisted):
+        if self.all_persisted_array.shape == (0,):
+            self.all_persisted_array = qpersisted
+        else:    
+            notin_mask = np.isin(qpersisted[:,0:2], self.all_persisted_array, invert = True).all(axis = 1)
+            if qpersisted[:,0:2][notin_mask].shape != (0,):
+                print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
+                self.all_persisted_array = np.vstack((self.all_persisted_array, qpersisted[notin_mask]))
+
+        print("HERE is self.all_persisted_array: ", self.all_persisted_array)
+        
 
     def cost_map(self, persisted):
         persisted_counts = persisted[:, 2]
@@ -383,7 +415,10 @@ class TreeFinder:
             print("HERE is max_indx: ", max_index)
 
             print("HERE IS Where to go: ", persisted[max_index, 0:2])
-            self.to_go(persisted[max_index, 0:2])
+            to_go = persisted[max_index, 0:2]
+            self.to_go(to_go)
+
+            self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
 
             #TODO call a func to go to place SUPER waypts
 
@@ -411,6 +446,31 @@ class TreeFinder:
         msg.pose.orientation.w = 1.0
 
         self.pub_super.publish(msg)
+
+    def dist_to_goal(self, to_go):
+        """!@brief Calculates the distance from the current odometry position to the goal waypoint
+            @details This function is called by the run function to check if the drone has reached the current waypoint
+            @param odom The current odometry position
+            @see publ"""
+        # print("DIST ODOM: ", odom, "\n")
+
+        drone_x = self.latest_pos.x
+        drone_y = self.latest_pos.y
+
+        dist_x = drone_x - to_go[0]
+        dist_y = drone_y - to_go[1]
+
+        squared_sum = pow(dist_x, 2) + pow(dist_y, 2)
+
+        distance = math.sqrt(squared_sum)
+        # print("D: ", distance)
+        if distance < 1:
+            # print("waypt reached")
+            if self.qbeen == (0,):
+                self.qbeen = to_go
+            else:
+                self.qbeen = np.vstack((self.qbeen, to_go))
+
 
 
 
