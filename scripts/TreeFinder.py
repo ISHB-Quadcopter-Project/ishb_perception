@@ -121,6 +121,16 @@ class TreeFinder:
         self.all_persisted_array = np.zeros(0)
         self.qbeen = np.zeros(0)
 
+        # self.zzpoints = np.array([
+        #     [0, 0], [12, 19], [24, 0], [36, 19], [48, 0], [60, 19], [72, 0],
+        #     [2, 3.167], [4, 6.333], [6, 9.5], [8, 12.667], [10, 15.833],
+        #     [14, 15.833], [16, 12.667], [18, 9.5], [20, 6.333], [22, 3.167],
+        #     [26, 3.167], [28, 6.333], [30, 9.5], [32, 12.667], [34, 15.833],
+        #     [38, 15.833], [40, 12.667], [42, 9.5], [44, 6.333], [46, 3.167],
+        #     [50, 3.167], [52, 6.333], [54, 9.5], [56, 12.667], [58, 15.833],
+        #     [62, 15.833], [64, 12.667], [66, 9.5], [68, 6.333], [70, 3.167],
+        # ], dtype=np.float32)
+
         #Odom var to hold the x,y,z odom data
         self.latest_pos = None
 
@@ -257,79 +267,79 @@ class TreeFinder:
             #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
-            """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
-                @see is_line @see clustering @see kd_tree_PCA
-                @param which An integer value representing which pancake is to be clustered.
-                @todo return is artifact of e_array stuff"""
-    
-            # print("HERE is which inside of centriod findeer: ", which)
-            # print("proc cloud list[0]: " ,self.processed_cloud_list[0])
-            self.kd_tree_PCA_done = False
-            if len(self.processed_cloud_list) > which:
-                processed_cloud = self.processed_cloud_list[which]
-                if len(processed_cloud):
-                    labels, n_clusters = self.clustering(processed_cloud, which)
-    
-                    # self.centroid_list = np.zeros((n_clusters-1,3))
-                    if n_clusters > 0:
-                        # e_array = np.zeros((n_clusters-1, 6))
-                        self.clustered_cloud_list.append(self.xy[labels != -1])
-                        # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
-    
-                        for clustnum in range(n_clusters-1):
-                            curr_clust = self.xy[labels == clustnum]
-                            # print("\n------HERE is curr_clust: ", curr_clust, "\n")
-                            xmean = np.mean(curr_clust[:,0])
-                            ymean = np.mean(curr_clust[:,1])
-    
-                            #Getting relevant cluster info from eigen func
-                            hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
-    
-                            clust_name = f"Cluster {self.mid_count}"
-    
-                            #Populate mid_z_dict if at mid z-sclie
-                            if is_mid and not self.is_line(hor_rms, elongation_num):
-                                # print("HERE is curr_clsut: ", curr_clust)
-                                num_pts = curr_clust.shape[0]
-    
-                                if num_pts < 1000: #Checking if the cluster is absurd
-    
-                                    #TODO replace this call with the filtering func
-                                    # print("HERE is num of ptS: ", num_pts)
-                                    self.mid_z_dict[clust_name]["num_pts"] = num_pts
-                                    self.mid_z_dict[clust_name]["xmean"] = xmean
-                                    self.mid_z_dict[clust_name]["ymean"] = ymean
-    
-                                    #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
-                                    self.text_dict[clust_name]["hor_rms"] = hor_rms
-                                    self.text_dict[clust_name]["ver_rms"] = ver_rms
-                                    self.text_dict[clust_name]["xmean"] = xmean
-                                    self.text_dict[clust_name]["ymean"] = ymean
-                                    self.text_dict[clust_name]["elongation_num"] = elongation_num
-    
-                                    self.mid_count += 1
-                                    # print("HERE is mid_count: ", self.mid_count)
-                            
-    
-    
-    
-                                # print("HERE is mid_z_dict: ", self.mid_z_dict)
-    
-                                    #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
-                                    # e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
-    
-                                # print("HER is e_array shape: ", e_array.shape)
-                            #TODO if else statement for returned value for is big func ARTIFACT???
-    
-                        #TODO
-                        # print("HERE is count: ", count)
-    
-                        if which == self.pancake_stacks - 1: 
-                            # print("before calling kd_tree_PCA")
-                            self.kd_tree_PCA(self.mid_count) #Call #TODO filtering func, after for loop so dict is fully populated
-                            # print("after calling kd_tree_PCA")
-                        # return e_array
-                    return None
+        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
+            @see is_line @see clustering @see kd_tree_PCA
+            @param which An integer value representing which pancake is to be clustered.
+            @todo return is artifact of e_array stuff"""
+
+        # print("HERE is which inside of centriod findeer: ", which)
+        # print("proc cloud list[0]: " ,self.processed_cloud_list[0])
+        self.kd_tree_PCA_done = False
+        if len(self.processed_cloud_list) > which:
+            processed_cloud = self.processed_cloud_list[which]
+            if len(processed_cloud):
+                labels, n_clusters = self.clustering(processed_cloud, which)
+
+                # self.centroid_list = np.zeros((n_clusters-1,3))
+                if n_clusters > 0:
+                    # e_array = np.zeros((n_clusters-1, 6))
+                    self.clustered_cloud_list.append(self.xy[labels != -1])
+                    # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
+
+                    for clustnum in range(n_clusters-1):
+                        curr_clust = self.xy[labels == clustnum]
+                        # print("\n------HERE is curr_clust: ", curr_clust, "\n")
+                        xmean = np.mean(curr_clust[:,0])
+                        ymean = np.mean(curr_clust[:,1])
+
+                        #Getting relevant cluster info from eigen func
+                        hor_rms, ver_rms, elongation_num = self.eigen(curr_clust, xmean, ymean)
+
+                        clust_name = f"Cluster {self.mid_count}"
+
+                        #Populate mid_z_dict if at mid z-sclie
+                        if is_mid and not self.is_line(hor_rms, elongation_num):
+                            # print("HERE is curr_clsut: ", curr_clust)
+                            num_pts = curr_clust.shape[0]
+
+                            if num_pts < 1000: #Checking if the cluster is absurd
+
+                                #TODO replace this call with the filtering func
+                                # print("HERE is num of ptS: ", num_pts)
+                                self.mid_z_dict[clust_name]["num_pts"] = num_pts
+                                self.mid_z_dict[clust_name]["xmean"] = xmean
+                                self.mid_z_dict[clust_name]["ymean"] = ymean
+
+                                #Putting hor_rms, xmean, and ymean in a dict dynamically to pub text
+                                self.text_dict[clust_name]["hor_rms"] = hor_rms
+                                self.text_dict[clust_name]["ver_rms"] = ver_rms
+                                self.text_dict[clust_name]["xmean"] = xmean
+                                self.text_dict[clust_name]["ymean"] = ymean
+                                self.text_dict[clust_name]["elongation_num"] = elongation_num
+
+                                self.mid_count += 1
+                                # print("HERE is mid_count: ", self.mid_count)
+                        
+
+
+
+                            # print("HERE is mid_z_dict: ", self.mid_z_dict)
+
+                                #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
+                                # e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
+
+                            # print("HER is e_array shape: ", e_array.shape)
+                        #TODO if else statement for returned value for is big func ARTIFACT???
+
+                    #TODO
+                    # print("HERE is count: ", count)
+
+                    if which == self.pancake_stacks - 1: 
+                        # print("before calling kd_tree_PCA")
+                        self.kd_tree_PCA(self.mid_count) #Call #TODO filtering func, after for loop so dict is fully populated
+                        # print("after calling kd_tree_PCA")
+                    # return e_array
+                return None
 
     def persistence_timer(self, event):
         """!@brief This function is called every self.persistence_dur seconds. Calls persistence().
@@ -408,7 +418,6 @@ class TreeFinder:
 
         print("HERE is self.all_persisted_array: ", self.all_persisted_array)
         
-
     def cost_map(self, persisted_array):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
         persisted_counts = persisted_array[:, 2]

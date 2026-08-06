@@ -75,6 +75,8 @@ class Accumulator:
         """!@see ourNode.ourNode.odom_cb"""
         with self.lock:
             self.latest_pos = msg.pose.pose.position
+            # print("HERE is x: ", self.latest_pos.x)
+            # print("HERE is y: ", self.latest_pos.y, "\n")
             #print("INSIDE HERE IS P: ", self.latest_pos)
             self.is_odom = True # latest_pos odom should be set by now
 
