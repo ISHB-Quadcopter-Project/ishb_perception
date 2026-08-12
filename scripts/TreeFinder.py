@@ -670,16 +670,25 @@ class TreeFinder:
 
             #Quantizing persisted to allow for more silimarity checks for bookkeeping
             qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, persisted[:,3])) #Adding the count col. back on after quantization
+
+            print("HERE is qpersisted, fresh q: ", qpersisted)
             
             #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
-            if self.qbeen.size > 0:
-                print("HERE is self.qbeen: ", self.qbeen)
-                #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
-                notin_mask = np.isin(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows #TODO using the false hits on notin_mask, add logic to if the counts better replace
+            # if self.qbeen.size > 0:
+            print("HERE is self.qbeen: ", self.qbeen)
+            #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
+            in_mask = np.isin(qpersisted[:,0:2], self.qbeen).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows #TODO using the false hits on notin_mask, add logic to if the counts better replace
+            print("here is the fresh in_mask foor fresh scans", in_mask)
+            # if self.qbeen.size > 0:
+            #     #TODO Quantize?
+            #     in_all_mask = np.isin(self.all_persisted_array, self.qbeen).all(axis = 1)
+            # else:
+            #     in_all_mask = np.ones_like(self.all_persisted_array, dtype=bool)
 
-                #Ensuring that qpersisted, and persisted centriods are ones not visited before. Reminder: (N,3). Col's x, y, count.
-                qpersisted = qpersisted[notin_mask]
-                persisted = persisted[notin_mask]
+            #Ensuring that qpersisted, and persisted centriods are ones not visited before. Adding this as a 1/0 col at the end. (N,4). Col's x, y, angle, count, been.
+            beencol = in_mask.T #or in_all_mask.T
+            qpersisted = np.column_stack((qpersisted, beencol))
+            persisted = np.column_stack((persisted, beencol))
     
             self.persist_bookkeeping(qpersisted, persisted)
 
@@ -688,12 +697,13 @@ class TreeFinder:
 
             # print("HERE is qpersisted: ", qpersisted)
             #Filtering self.all_persisted_array with centroids alreadly visited. This ensures a global list with only unvisited places is given to cost_map.
-            if self.qbeen.size > 0:
-                quantized_allp = np.floor(self.all_persisted_array / self.tol) * self.tol
-                notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
-                self.all_persisted_array = self.all_persisted_array[notin_mask]
+            #TODO get rid of b/c
+            # if self.qbeen.size > 0:
+            #     quantized_allp = np.floor(self.all_persisted_array / self.tol) * self.tol
+            #     notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
+            #     self.all_persisted_array = self.all_persisted_array[notin_mask]
 
-                print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array)
+            #     print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array)
 
             self.scoring_func(self.all_persisted_array)
 
@@ -768,6 +778,7 @@ class TreeFinder:
             p1par_allmask = np.vstack((p1[valid], p1par[par_mask]))
 
             notin_mask = np.isin(self.all_persisted_array[:,0:2], p1par_allmask, invert = True).all(axis = 1)
+            print("I AM HERE HAVING")
             self.all_persisted_array = self.all_persisted_array[notin_mask]
 
 
@@ -776,7 +787,9 @@ class TreeFinder:
 
     def persist_bookkeeping(self, qpersisted, persisted):
         """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to"""
-        #self.all_persisted_array is a global persisted numpy array. Reminder: (N,3). Col's x, y, count.
+        #self.all_persisted_array is a global persisted numpy array. Reminder: (N,4). Col's x, y, angle, count, been.
+        print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
+
         if persisted.size != 0 :
             persisted = np.trunc(persisted * self.trunc_factor) / self.trunc_factor
 
@@ -785,17 +798,24 @@ class TreeFinder:
         else:
             #Checking if quantized persisted are alreadly in quantized self.all_persisted_array. Note: We use quantized since we are doing simliarity checks.
             notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array / self.tol) * self.tol, invert = True).all(axis = 1)
-            if qpersisted[:,0:2][notin_mask].shape != (0,):
+            if qpersisted[:,0:2][notin_mask].size != 0:
                 print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
-        print("HERE is self.all_persisted_array: ", self.all_persisted_array)
+        print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
 
-    def scoring_func(self, persisted_array):
+    def scoring_func(self, persisted_array_all):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
         #TODO add score for zig zag waypts, and condiitonal to defult to zig zag path is nothing in self.all_persisted_array
-        if persisted_array.size == 0:
-            print("--------I AM NOT HAVING TRESS!--------") 
+        if persisted_array_all.size == 0:
+            print("--------I AM NOT HAVING TRESS!--------")
+
+        # qpersisted_array = np.floor(persisted_array / self.tol) * self.tol 
+
+        not_been_mask = persisted_array_all[:,4] == 0
+        print("not beeen here yet mask in the scoring: " , not_been_mask)
+        persisted_array = persisted_array_all[not_been_mask]
+        print("not beeen here persisted array fro scoring " , persisted_array) 
 
         persisted_counts = persisted_array[:, 3] #TODO changed to 4th col
         persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
@@ -873,9 +893,17 @@ class TreeFinder:
         # print("D: ", distance)
         if distance < self.goal_tol:
             # print("waypt reached")
+            #Flip the been col value to 1 for the centriod we went to
+            #TODO where is togo in self.all_ersiste... quantize it first?
+            qall_persisted_array = np.floor(self.all_persisted_array / self.tol) * self.tol
+
+            row,cols = np.where(qall_persisted_array[:,0:2] == qto_go)
+            self.all_persisted_array[row, 4] = 1.0
+
             if self.qbeen.size > 0:
                 # print("I AM NOT HAVING: ", self.qbeen)
                 self.qbeen = np.vstack((self.qbeen, qto_go))
+
             else:
                 # print("I AM HAVING self.qbeen: ", self.qbeen)
                 self.qbeen = qto_go
