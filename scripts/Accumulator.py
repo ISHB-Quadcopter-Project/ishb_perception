@@ -89,7 +89,11 @@ class Accumulator:
 
         self.latest_cloud = cloud_to_xyz(msg) 
 
+        # print("HERE is shape latest cloud: ", self.latest_cloud.shape)
+
         reduced = self.down_cloud(self.latest_cloud) #Downsample outside lock to avoid thread being locked excessively
+
+        # print("HERE is shape reduced: ", reduced.shape)
 
         with self.lock:
             if len(self.latest_cloud):

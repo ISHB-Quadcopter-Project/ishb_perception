@@ -41,6 +41,8 @@ class TreeFinder:
 
         self.pub_line = rospy.Publisher("LINES", PointCloud2, queue_size = 10)
 
+        self.pub_hespline = rospy.Publisher("HESP_LINES", PointCloud2, queue_size = 10)
+
         self.pub_not_line = rospy.Publisher("NOT_LINES", PointCloud2, queue_size = 10)
 
         self.pub_persisted = rospy.Publisher("PERSISTED", PointCloud2, queue_size = 10)
@@ -107,7 +109,8 @@ class TreeFinder:
         self.kd_tree_PCA_done = False
 
         self.persistence_list = []
-        self.tol = 0.3
+        self.tol = 0.08
+        self.goal_tol = 1
 
         self.persistence_freq = 0
 
@@ -120,6 +123,18 @@ class TreeFinder:
 
         self.all_persisted_array = np.zeros(0)
         self.qbeen = np.zeros(0)
+
+        self.linelen = 2
+        self.hlines = []
+
+        self.freq_percent = 0.5
+
+        self.trunc_deci = 5
+        self.trunc_factor = 10 ** 5
+
+        self.all_p1 = np.zeros(0)
+
+        #TODO organize init, and add a section of all things can tune
 
         # self.zzpoints = np.array([
         #     [0, 0], [12, 19], [24, 0], [36, 19], [48, 0], [60, 19], [72, 0],
@@ -158,7 +173,7 @@ class TreeFinder:
         rospy.spin()
 
     
-#-------Subscriber Thread--------
+#---------------------------------------------------------------------------------------Subscriber Thread-----------------------------------------------------------------------------------------
     def odom_cb(self, msg):
         """!@brief Callback function for the /Odometry topic
             @details Updates the latest odometry position and sets the is_odom flag to True. Odom data is stored in a list for the odom_watchdog to check if the drone is moving.
@@ -216,7 +231,7 @@ class TreeFinder:
         return cut_cloud[first,0:2] 
 
 
-#-------Timer Threads (that sub and pub both depend on)-----
+#--------------------------------------------------------------------------on_timer Thread (that sub and pub both depend on)-------------------------------------------------------------------------------
     def on_timer(self,event):
         """!@brief Timer callback to call centroid_finder on each z-slices. Calls publ too.
             @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice. If kd_tree_PCA is done, based on a flag, then relevant list and dicts for this class's operations are cleared to ensure data is refreshed.
@@ -341,174 +356,6 @@ class TreeFinder:
                     # return e_array
                 return None
 
-    def persistence_timer(self, event):
-        """!@brief This function is called every self.persistence_dur seconds. Calls persistence().
-            @see persistence"""
-        with self.lock:
-            self.persistence()
-            self.persistence_list.clear() #Clear the list, so new new persistence data is refreshed every self.persistence_dur sec
-    def persistence(self):
-        if len(self.persistence_list):
-            #Vertically stack persistence_list, (N,2). Col's x, y centroids
-            vpersist = np.vstack(self.persistence_list)
-            print("HERE vpersist shape: ", vpersist.shape)
-
-            #Quantize the centroids, to allow for similarity checks later
-            quantized = np.floor( vpersist / self.tol) * self.tol
-
-            #Find the uniqe centroids that appear over self.persistence_dur. Also get the # times appears, for persistence checking. Done on quantized centroids to avoid high precision dec nums tricking persistence.
-            _, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~100~,2)
-
-            #Frequencies is of shape (N,3). Col's x, y, count of unique centroids
-            frequencies = np.column_stack((vpersist[inx], counts))
-            print("freq: ", frequencies)
-
-            #Finding the unique centroid with the highest count. #TODO May replace with highest possible count in self.persistence_dur.
-            max_count = np.max(frequencies[:,2])
-            self.persistence_freq = max_count * 0.825 #This is our count threshold
-
-            #Construting a boolean mask of counts that pass our count threshold. This is applied to frequencies to get the "persisted" centriods.
-            persist_mask = frequencies[:,2] > self.persistence_freq
-            persisted = frequencies[persist_mask]
-            print("persisted: ", persisted)
-
-            #Quantizing persisted to allow for more silimarity checks for bookkeeping
-            qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, persisted[:,2])) #Adding the count col. back on after quantization
-
-            #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
-            if self.qbeen.size > 0:
-                print("HERE is self.qbeen: ", self.qbeen)
-                #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
-                notin_mask = np.isin(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows
-
-                #Ensuring that qpersisted, and persisted centriods are ones not visited before. Reminder: (N,3). Col's x, y, count.
-                qpersisted = qpersisted[notin_mask]
-                persisted = persisted[notin_mask]
-    
-            self.persist_bookkeeping(qpersisted, persisted)
-
-            # print("HERE is qpersisted: ", qpersisted)
-            #Filtering self.all_persisted_array with centroids alreadly visited. This ensures a global list with only unvisited places is given to cost_map.
-            if self.qbeen.size > 0:
-                quantized_allp = np.floor(self.all_persisted_array / self.tol) * self.tol
-                notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
-                self.all_persisted_array = self.all_persisted_array[notin_mask]
-
-                print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array)
-
-            self.cost_map(self.all_persisted_array)
-
-
-            #Publishing stuff:
-            const_z_height = np.ones((persisted.shape[0], 1)) * 1.67
-            self.pub_persisted_array = np.column_stack((persisted[:, 0:2], const_z_height))
-            # print(self.pub_persisted_array)
-    
-    def persist_bookkeeping(self, qpersisted, persisted):
-        """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to"""
-        #self.all_persisted_array is a global persisted numpy array. Reminder: (N,3). Col's x, y, count.
-        if self.all_persisted_array.shape == (0,):
-            self.all_persisted_array = persisted
-        else:
-            #Checking if quantized persisted are alreadly in quantized self.all_persisted_array. Note: We use quantized since we are doing simliarity checks.
-            notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array / self.tol) * self.tol, invert = True).all(axis = 1)
-            if qpersisted[:,0:2][notin_mask].shape != (0,):
-                print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
-                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
-
-        print("HERE is self.all_persisted_array: ", self.all_persisted_array)
-        
-    def cost_map(self, persisted_array):
-        """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
-        persisted_counts = persisted_array[:, 2]
-        persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
-        # print("HERE is count_scores: ", persisted_scores)
-
-        if self.is_odom:
-            drone_x = self.latest_pos.x
-            drone_y = self.latest_pos.y
-
-            x_dist = persisted_array[:, 0] - drone_x
-            y_dist = persisted_array[:, 1] - drone_y
-
-            xy_dist = np.column_stack((x_dist, y_dist))
-
-            norms = np.linalg.norm(xy_dist, axis = 1)
-            norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
-            # print("HER is norm_score: ", norms_score)
-
-            #Assesment, whichever linear combination is highest
-            assesment = persisted_scores - norms_score
-            # print("HERE is asses: ", assesment)
-
-            #Finding the index of the max_score, this will be the tree we go to
-            max_index = np.argmax(assesment)
-            # print("HERE is max_indx: ", max_index)
-            print("HERE IS Where to go: ", persisted_array[max_index, 0:2])
-            to_go = persisted_array[max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
-            self.to_go(to_go)
-
-            self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
-
-    def to_go(self, to_go):
-        """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
-            @details Notice that to_go is not quantized. We want maximum precision to avoid collision."""
-        #Creating message to publish
-        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
-        #Rviz Point
-        point = PointStamped()
-        point.header = header
-        point.point.x = to_go[0]
-        point.point.y = to_go[1]
-        point.point.z = 2.67
-
-        self.pub_to_go_pt.publish(point)
-
-        #SUPER
-        msg = PoseStamped() 
-        msg.header = header
-
-        # print(self.waypt_index)
-        msg.pose.position.x = to_go[0]
-        msg.pose.position.y = to_go[1]
-        msg.pose.position.z = 0.25
-        msg.pose.orientation.w = 1.0
-
-        self.pub_super.publish(msg)
-
-    def dist_to_goal(self, to_go):
-        """!@brief Calculates the distance from the current odometry position to the place to go to.
-            @details """
-        #Quantizing the centroid to go to, to allow for putting this in self.qbeen
-        qto_go = np.floor(to_go / self.tol) * self.tol
-
-        drone_x = self.latest_pos.x
-        drone_y = self.latest_pos.y
-
-        dist_x = drone_x - to_go[0]
-        dist_y = drone_y - to_go[1]
-
-        squared_sum = pow(dist_x, 2) + pow(dist_y, 2)
-
-        distance = math.sqrt(squared_sum)
-
-        #If the to_go has been reached, then add qto_go 
-        # print("D: ", distance)
-        if distance < 1:
-            # print("waypt reached")
-            if self.qbeen.size > 0:
-                print("I AM NOT HAVING: ", self.qbeen)
-                self.qbeen = np.vstack((self.qbeen, qto_go))
-            else:
-                print("I AM HAVING self.qbeen: ", self.qbeen)
-                self.qbeen = qto_go
-
-
-
-
-
-        #TODO pass in the persisted numpy array. Then save the normalized counts as persisted scores. Then compute the distance from where rn (from odom) to the centroid of mid z-slice.
-
     #---Fork 1 called by centriod_finder---
     def clustering(self, points, which): 
         """!@brief Clusters a point cloud using DBSCAN and returns the labels and number of clusters.
@@ -593,28 +440,29 @@ class TreeFinder:
             # print("\n------INSIDE EIGEN------")
             # print("xmean: ", xmean)
             # print("ymean: ", ymean, "\n")
+            if curr_clust.size != 0:
+            
+                normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
+                # print("HERE is normalized shape: ", normalized.shape)
         
-            normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
-            #  print("HERE is normalized shape: ", normalized.shape)
-    
-            cov_matrix = np.cov(normalized, rowvar = False)
-            #  print("HERE is cov matrix: ", cov_matrix)
-            #  print("HERE is cov matrix shape: ", cov_matrix.shape)
-    
-            eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
-            # print("Eigenvalues:\n", eigenvalues)
-            # print("Eigenvectors:\n", eigenvectors)
-            hor_rms = math.sqrt(abs(eigenvalues[0]))
-            ver_rms = math.sqrt(abs(eigenvalues[1]))
-            if ver_rms != 0:
-                elongation_num = math.sqrt(hor_rms/ver_rms)
-            else:
-                elongation_num = 0
-            # print("HERE is hor_rms in eign func: ", hor_rms)
-            # print("HERE is ver_rms: ", ver_rms)
-            # print("HERE is elong: ", elongation_num)
-    
-            return hor_rms, ver_rms, elongation_num  
+                cov_matrix = np.cov(normalized, rowvar = False)
+                #  print("HERE is cov matrix: ", cov_matrix)
+                #  print("HERE is cov matrix shape: ", cov_matrix.shape)
+        
+                eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+                # print("Eigenvalues:\n", eigenvalues)
+                # print("Eigenvectors:\n", eigenvectors)
+                hor_rms = math.sqrt(abs(eigenvalues[0]))
+                ver_rms = math.sqrt(abs(eigenvalues[1]))
+                if ver_rms != 0:
+                    elongation_num = math.sqrt(hor_rms/ver_rms)
+                else:
+                    elongation_num = 0
+                # print("HERE is hor_rms in eign func: ", hor_rms)
+                # print("HERE is ver_rms: ", ver_rms)
+                # print("HERE is elong: ", elongation_num)
+        
+                return hor_rms, ver_rms, elongation_num  
     
     def is_line(self, hor_rms, elongation_num):
         """!@brief Determines if a cluster is line shaped based on horizontal RMS and elongation number.
@@ -721,8 +569,26 @@ class TreeFinder:
                     is_vertical_flag = self.is_vertical(z_eig)
                     if is_vertical_flag:
                         #Setting up list of centriods for persistence
-                        centriod_xy = np.array([self.mid_z_dict[clust_name]["xmean"], self.mid_z_dict[clust_name]["ymean"]])
-                        self.persistence_list.append(centriod_xy)
+                        if self.is_odom:
+                            #Calculate values for hasbeenhere
+                            drone_x = self.latest_pos.x
+                            drone_y = self.latest_pos.y
+
+                            xmean = self.mid_z_dict[clust_name]["xmean"]
+                            ymean = self.mid_z_dict[clust_name]["ymean"]
+
+                            x = xmean - drone_x
+                            y = ymean - drone_y
+
+                            angle = math.atan2(y,x)
+                            
+                            #TODO get angles from np.atan2(y,x) , make sure it works and gives you a 0 to 2pi  or -pi to pi once more
+                            #TODO in hasbeen, make paramterization of lines and solves for the intersection, then you solve for how far it is from the two centroids (the parameter t)
+                            #TODO now you do the conditional to make sure its not too damn far
+                            #TODO also consider edge case with parallel stuff --> just dont consider it lol
+
+                            centriod_xy = np.array([xmean, ymean, angle])
+                            self.persistence_list.append(centriod_xy)
 
 
                         #TODO put centroids in a list, then make another func to be called in on_timer. This func is to make a numpy array from this list and vstack it. Use the vectorized np.unique on this, to get jus tthe uniq centriods. Then use this as 
@@ -768,13 +634,300 @@ class TreeFinder:
             return True
         return False
 
-  
+
+#----------------------------------------------------------------Persistent Timer Thread(data dependant on centroid finder, indirectly on_timer)-----------------------------------------------------
+    def persistence_timer(self, event):
+        """!@brief This function is called every self.persistence_dur seconds. Calls persistence().
+            @see persistence"""
+        with self.lock:
+            self.persistence()
+            self.persistence_list.clear() #Clear the list, so new new persistence data is refreshed every self.persistence_dur sec
+
+    def persistence(self):
+        if len(self.persistence_list):
+            #Vertically stack persistence_list, (N,2). Col's x, y centroids
+            vpersist = np.vstack(self.persistence_list)
+            # print("HERE vpersist shape: ", vpersist.shape)
+
+            #Quantize the centroids, to allow for similarity checks later
+            quantized = np.floor( vpersist / self.tol) * self.tol
+
+            #Find the uniqe centroids that appear over self.persistence_dur. Also get the # times appears, for persistence checking. Done on quantized centroids to avoid high precision dec nums tricking persistence.
+            _, inx, counts = np.unique(quantized, return_index = True, return_counts = True, axis = 0) #Choosing do regular np.unique since vpersist only (~100~,2)
+
+            #Frequencies is of shape (N,3). Col's x, y, count of unique centroids
+            frequencies = np.column_stack((vpersist[inx], counts))
+            # print("freq: ", frequencies)
+
+            #Finding the unique centroid with the highest count. #TODO May replace with highest possible count in self.persistence_dur.
+            max_count = self.max_pers_counts #TODO fixing the coutn col cuz now the 4th one
+            self.persistence_freq = max_count * self.freq_percent #This is our count threshold
+
+            #Construting a boolean mask of counts that pass our count threshold. This is applied to frequencies to get the "persisted" centriods.
+            persist_mask = frequencies[:,3] > self.persistence_freq
+            persisted = frequencies[persist_mask]
+            # print("persisted: ", persisted)
+
+            #Quantizing persisted to allow for more silimarity checks for bookkeeping
+            qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, persisted[:,3])) #Adding the count col. back on after quantization
+            
+            #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
+            if self.qbeen.size > 0:
+                print("HERE is self.qbeen: ", self.qbeen)
+                #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
+                notin_mask = np.isin(qpersisted[:,0:2], self.qbeen, invert = True).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows #TODO using the false hits on notin_mask, add logic to if the counts better replace
+
+                #Ensuring that qpersisted, and persisted centriods are ones not visited before. Reminder: (N,3). Col's x, y, count.
+                qpersisted = qpersisted[notin_mask]
+                persisted = persisted[notin_mask]
+    
+            self.persist_bookkeeping(qpersisted, persisted)
+
+            #TODO call hespanha's func, before seeing if been here, beacuse this func might add to qbeen
+            self.hasbeenhere()
+
+            # print("HERE is qpersisted: ", qpersisted)
+            #Filtering self.all_persisted_array with centroids alreadly visited. This ensures a global list with only unvisited places is given to cost_map.
+            if self.qbeen.size > 0:
+                quantized_allp = np.floor(self.all_persisted_array / self.tol) * self.tol
+                notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
+                self.all_persisted_array = self.all_persisted_array[notin_mask]
+
+                print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array)
+
+            self.scoring_func(self.all_persisted_array)
+
+
+            #Publishing stuff:
+            const_z_height = np.ones((self.all_persisted_array.shape[0], 1)) * 1.67
+            self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
+            # print(self.pub_persisted_array)
+
+    def hasbeenhere(self):
+        if len(self.all_persisted_array):
+            #Direcctions of the angles in polar
+            dirs = np.column_stack((np.cos(self.all_persisted_array[:,2]), np.sin(self.all_persisted_array[:,2])))
+
+            #chooses the upper triangle 1 diag above the main diag, to choose which where i and j are pairs we check against each other, wihtout repeating ourselves
+            i, j = np.triu_indices(self.all_persisted_array.shape[0],k=1) #i and j are lists
+
+            #Indexes self.all_persisted_array for the cenriod x,y, and only at the trianlge indices to creates unique pairs for all poss lines
+            p1 = self.all_persisted_array[:,0:2][i]
+            p2 = self.all_persisted_array[:,0:2][j]
+
+            #Indexes the polar directions only at triangle indices
+            d1 = dirs[i]
+            d2 = dirs[j]
+
+            #Construct the linear system to solve, finding the parameters t1 and t2 for all poss lines
+            matrixA = np.stack((d1, -d2), axis = -1) #d1 and -d2 are placed as a tensor, shape is (i or j, 2, 2)
+            b = p2 - p1
+
+            #Finding the det, if it is 0 then there is no intersection (no sol), thus should not be included
+            det = matrixA[:, 0, 0] * matrixA[:, 1, 1] - matrixA[:, 0, 1] * matrixA[:, 1, 0]
+
+            #Create boolean mask for non par. lines
+            nonpar = np.abs(det) > 1e-10
+
+
+            #parrallel case, do min distance from d1 vector normal
+            parallel = ~nonpar
+            d1par = d1[parallel]
+            p1par = p1[parallel]
+            p2par = p2[parallel]
+            n = np.column_stack((-d1par[:, 1], d1par[:, 0]))
+
+            parallel_dist = np.abs(np.sum((p2par - p1par) * n, axis=1))
+
+            par_mask = parallel_dist < 0.67 #TODO MAKE ME GLOBAL TUNABLE BUDDY 
+
+
+
+            # print("HERE is nonpar boolean mask: ", nonpar)
+
+
+            #nonparallel case, do solve for intersection legnth
+            #Creating empty numpy area to hold the parameters of the lines we are going to solve for
+            t = np.full((len(i),2), np.nan)
+
+            #Masking t by nonpar to make right size. Then solving linear system to find parameters of the line (len of line for polar, r)
+            t[nonpar] = np.linalg.solve(matrixA[nonpar], b[nonpar])
+
+            # print("HERE is len of lines: ", t)
+
+            #Creating another boolean mask for valid lines
+            valid = (nonpar) & (t[:,0] >=-2) & (t[:,1] >= -2) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
+
+            print("HERE is p1[valid]: ", p1[valid])
+            print("HERE is p2[valid]: ", p2[valid], "\n")
+
+            self.make_lines()
+
+            #TODO make an not is in mask for1st two col of self.allpersisited array and p1, this we then filter self.persisited array with yay
+            # self.all_p1 = np.vstackp1[valid or par_mask]
+            p1par_allmask = np.vstack((p1[valid], p1par[par_mask]))
+
+            notin_mask = np.isin(self.all_persisted_array[:,0:2], p1par_allmask, invert = True).all(axis = 1)
+            self.all_persisted_array = self.all_persisted_array[notin_mask]
+
+
+            #TODO MAYBE: right after, see if the intersected mask, the correlated one in p2, is intersecting any other points, as that will mean probably that centroid also same tree
+            #TODO or just go in order and combine the labels that are of the same tree
+
+    def persist_bookkeeping(self, qpersisted, persisted):
+        """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to"""
+        #self.all_persisted_array is a global persisted numpy array. Reminder: (N,3). Col's x, y, count.
+        if persisted.size != 0 :
+            persisted = np.trunc(persisted * self.trunc_factor) / self.trunc_factor
+
+        if self.all_persisted_array.shape == (0,):
+            self.all_persisted_array = persisted
+        else:
+            #Checking if quantized persisted are alreadly in quantized self.all_persisted_array. Note: We use quantized since we are doing simliarity checks.
+            notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array / self.tol) * self.tol, invert = True).all(axis = 1)
+            if qpersisted[:,0:2][notin_mask].shape != (0,):
+                print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
+                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
+
+        print("HERE is self.all_persisted_array: ", self.all_persisted_array)
+
+    def scoring_func(self, persisted_array):
+        """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
+        #TODO add score for zig zag waypts, and condiitonal to defult to zig zag path is nothing in self.all_persisted_array
+        if persisted_array.size == 0:
+            print("--------I AM NOT HAVING TRESS!--------") 
+
+        persisted_counts = persisted_array[:, 3] #TODO changed to 4th col
+        persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
+        # print("HERE is count_scores: ", persisted_scores)
+
+        if self.is_odom:
+            drone_x = self.latest_pos.x
+            drone_y = self.latest_pos.y
+
+            x_dist = persisted_array[:, 0] - drone_x
+            y_dist = persisted_array[:, 1] - drone_y
+
+            xy_dist = np.column_stack((x_dist, y_dist))
+
+            norms = np.linalg.norm(xy_dist, axis = 1)
+            norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
+            # print("HER is norm_score: ", norms_score)
+
+            #Assesment, whichever linear combination is highest 
+            assesment = persisted_scores - norms_score
+            # print("HERE is asses: ", assesment)
+
+            #Finding the index of the max_score, this will be the tree we go to
+            max_index = np.argmax(assesment)
+            # print("HERE is max_indx: ", max_index)
+            print("HERE IS Where to go: ", persisted_array[max_index, 0:2])
+            to_go = persisted_array[max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
+            self.to_go(to_go)
+
+            self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
+
+    def to_go(self, to_go):
+        """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
+            @details Notice that to_go is not quantized. We want maximum precision to avoid collision."""
+        #Creating message to publish
+        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
+        #Rviz Point
+        point = PointStamped()
+        point.header = header
+        point.point.x = to_go[0]
+        point.point.y = to_go[1]
+        point.point.z = 2.67
+
+        self.pub_to_go_pt.publish(point)
+
+        #SUPER
+        msg = PoseStamped() 
+        msg.header = header
+
+        # print(self.waypt_index)
+        msg.pose.position.x = to_go[0]
+        msg.pose.position.y = to_go[1]
+        msg.pose.position.z = 0.25
+        msg.pose.orientation.w = 1.0
+
+        self.pub_super.publish(msg)
+
+    def dist_to_goal(self, to_go):
+        """!@brief Calculates the distance from the current odometry position to the place to go to.
+            @details """
+        #Quantizing the centroid to go to, to allow for putting this in self.qbeen
+        qto_go = np.floor(to_go / self.tol) * self.tol
+
+        drone_x = self.latest_pos.x
+        drone_y = self.latest_pos.y
+
+        dist_x = drone_x - to_go[0]
+        dist_y = drone_y - to_go[1]
+
+        squared_sum = pow(dist_x, 2) + pow(dist_y, 2)
+
+        distance = math.sqrt(squared_sum)
+
+        #If the to_go has been reached, then add qto_go 
+        # print("D: ", distance)
+        if distance < self.goal_tol:
+            # print("waypt reached")
+            if self.qbeen.size > 0:
+                # print("I AM NOT HAVING: ", self.qbeen)
+                self.qbeen = np.vstack((self.qbeen, qto_go))
+            else:
+                # print("I AM HAVING self.qbeen: ", self.qbeen)
+                self.qbeen = qto_go
+
+
+
+
+
+        #TODO pass in the persisted numpy array. Then save the normalized counts as persisted scores. Then compute the distance from where rn (from odom) to the centroid of mid z-slice.
+
+    def make_lines(self):
+        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
+        vec = np.column_stack((np.cos(self.all_persisted_array[:,2]), np.sin(self.all_persisted_array[:,2])))
+
+        if vec.shape != (0,):
+            length = self.linelen # i thiiink thats what ths is
+            line = np.linspace(0,length,50)[:,np.newaxis]
+
+            # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
+            # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
+
+            for i in range(vec.shape[0]):
+                self.hlines.append(line * vec[i] + self.all_persisted_array[i,0:2])
+
+
+            
+
+        
+
+
+
+
+
+
+        #Performs broadcasting to the (20,1) and (3,) vectors, to allow for use of vectozied element-wise multiplication. Centroid it added so the line starts at the correct tree.
+        # z = np.ones(vec.shape[0],1) * 0.67
+        # withz = np.cloumn_stack((self.all_persisted_array[:,0:2],z))
+
+        # print("HERE is shape sdfhslfgdhsg: ", self.all_persisted_array[:,0:2])
+        # print("HERE is shape ofmulticpation: ",(vec @ stacked_line))
+
+        # self.hlines = (vec @ stacked_line) + self.all_persisted_array[:,0:2]
+        # print("HERE is hlines: ", self.hlines)
+        # print("HERE is hlines shape: ", self.hlines.shape, "\n")
+
+        #Whether the line passing verticality test, append it to the corresponding publishing list
+        #TODO publish
 
     #TODO Filtering func. This will call PCA func, take the outputed numpy array (either reutnr of make global idk yet), and pass into PCA func. This willl then
     #take the poential trees PCA said aren't trees, and filter the cand_trees (or make a new list) accordingly
 
-    #-------Publishing Thread------
-
+#---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
     def publ(self):
         """!@brief"""
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
@@ -801,58 +954,68 @@ class TreeFinder:
             persisted_dots = make_pointcloud2_xyz32(header, self.pub_persisted_array)
             self.pub_persisted.publish(persisted_dots)
 
+        # if self.hlines != None:
+        if len(self.hlines):
+            # print("HERE is hlines: ", self.hlines)
+            line_stacked = np.vstack(self.hlines)
+            z_ones = np.ones((line_stacked.shape[0],1)) * 0.67
+            line_stacked_with_z = np.column_stack((line_stacked,z_ones))
+            hline_cloud = make_pointcloud2_xyz32(header, line_stacked_with_z)
+            self.pub_hespline.publish(hline_cloud)
+
         #TODO check if the text dict is len, then publish
+        #TODO uncomment for text debugging
         # print("HERE is if kd_tree_PCA_done: ", self.kd_tree_PCA_done)
-        if len(self.text_dict) > 0:
+        # if len(self.text_dict) > 0:
 
-            marker_array = MarkerArray()
+        #     marker_array = MarkerArray()
 
-            for cluster in enumerate(self.text_dict):
-                marker = Marker()
-                marker.header = header
-                marker.ns = "text_messages"
-                marker.id = cluster[0]  # Unique ID per text string
-                marker.type = Marker.TEXT_VIEW_FACING
-                marker.action = Marker.ADD
+        #     for cluster in enumerate(self.text_dict):
+        #         marker = Marker()
+        #         marker.header = header
+        #         marker.ns = "text_messages"
+        #         marker.id = cluster[0]  # Unique ID per text string
+        #         marker.type = Marker.TEXT_VIEW_FACING
+        #         marker.action = Marker.ADD
 
-                # print("HERE is text dict: ", self.text_dict, "\n")
-                clus_num = cluster[1] #API have to do, 0 is index
-                # Position of the text in 3D space
-                marker.pose.position.x = self.text_dict[clus_num]["xmean"]
-                marker.pose.position.y = self.text_dict[clus_num]["ymean"]
-                marker.pose.position.z = 10
-                marker.pose.orientation.w = 1.0
+        #         # print("HERE is text dict: ", self.text_dict, "\n")
+        #         clus_num = cluster[1] #API have to do, 0 is index
+        #         # Position of the text in 3D space
+        #         marker.pose.position.x = self.text_dict[clus_num]["xmean"]
+        #         marker.pose.position.y = self.text_dict[clus_num]["ymean"]
+        #         marker.pose.position.z = 10
+        #         marker.pose.orientation.w = 1.0
                 
-                # Text scale/size (Z controls height of capital letters)
-                marker.scale.z = 0.15
+        #         # Text scale/size (Z controls height of capital letters)
+        #         marker.scale.z = 0.15
 
-                # Text color
-                marker.color.r = 0
-                marker.color.g = 0
-                marker.color.b = 1.0
-                marker.color.a = 1.0
+        #         # Text color
+        #         marker.color.r = 0
+        #         marker.color.g = 0
+        #         marker.color.b = 1.0
+        #         marker.color.a = 1.0
 
-                # print("INSIDE PUBLISH")
-                # print(f"HERE is self.text_dict[{clus_num}]: ", self.text_dict[clus_num])
-                # print("\n")
+        #         # print("INSIDE PUBLISH")
+        #         # print(f"HERE is self.text_dict[{clus_num}]: ", self.text_dict[clus_num])
+        #         # print("\n")
 
-                hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
-                ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)
-                elong = round(self.text_dict[clus_num]["elongation_num"], 4)
+        #         hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
+        #         ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)
+        #         elong = round(self.text_dict[clus_num]["elongation_num"], 4)
 
-                x_eig = np.round(self.text_dict[clus_num]["x_eig"], decimals=4)
-                x_index = self.text_dict[clus_num]["x_index"]
-                y_eig = np.round(self.text_dict[clus_num]["y_eig"], decimals=4)
-                y_index = round(self.text_dict[clus_num]["y_index"], 4)
-                z_eig = self.text_dict[clus_num]["z_eig"]
-                z_index = np.round(self.text_dict[clus_num]["z_index"], decimals=4)
+        #         x_eig = np.round(self.text_dict[clus_num]["x_eig"], decimals=4)
+        #         x_index = self.text_dict[clus_num]["x_index"]
+        #         y_eig = np.round(self.text_dict[clus_num]["y_eig"], decimals=4)
+        #         y_index = round(self.text_dict[clus_num]["y_index"], 4)
+        #         z_eig = self.text_dict[clus_num]["z_eig"]
+        #         z_index = np.round(self.text_dict[clus_num]["z_index"], decimals=4)
                 
-                marker.text = f"hor_rms: {hor_rms}, ver_rms: {ver_rms}, elongation: {elong}, \nx_eig: {x_eig}, x_index: {x_index}, \ny_eig: {y_eig}, y_index: {y_index}, \nz_eig: {z_eig}, z_index: {z_index}"
-                marker.lifetime = rospy.Duration(0.1)  # Refresh duration
+        #         marker.text = f"hor_rms: {hor_rms}, ver_rms: {ver_rms}, elongation: {elong}, \nx_eig: {x_eig}, x_index: {x_index}, \ny_eig: {y_eig}, y_index: {y_index}, \nz_eig: {z_eig}, z_index: {z_index}"
+        #         marker.lifetime = rospy.Duration(0.1)  # Refresh duration
                 
-                marker_array.markers.append(marker)
+        #         marker_array.markers.append(marker)
 
-            self.pub_text.publish(marker_array)
+        #     self.pub_text.publish(marker_array)
 
         # if len(self.PCA_zaxis_list):
         #     marker = Marker()
