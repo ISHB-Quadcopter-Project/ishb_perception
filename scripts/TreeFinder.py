@@ -47,6 +47,8 @@ class TreeFinder:
 
         self.pub_persisted = rospy.Publisher("PERSISTED", PointCloud2, queue_size = 10)
 
+        self.pub_intersect = rospy.Publisher("INTERSECT", PointCloud2, queue_size = 10)
+
         self.pub_to_go_pt = rospy.Publisher("TOGO", PointStamped, queue_size = 10)
 
         self.pub_text = rospy.Publisher('/TEXT', MarkerArray, queue_size=10)
@@ -55,13 +57,6 @@ class TreeFinder:
         self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
         self.cloud_section_one = None
         self.cloud_section_two = None
-
-        #Timer
-        self.on_timer_dur = 0.1
-        rospy.Timer(rospy.Duration(self.on_timer_dur), self.on_timer)  # 10 Hz
-
-        self.persistence_dur = 3
-        rospy.Timer(rospy.Duration(self.persistence_dur), self.persistence_timer)  # 1 Hz
 
         self.latest_cloud = None
         
@@ -116,6 +111,8 @@ class TreeFinder:
 
         self.pub_persisted_array = np.zeros(0)
 
+        self.persistence_dur = 3
+        self.on_timer_dur = 0.1
         #Maximum possible counts is the duration of persistence, divided by how often you add to the persistence_list
         self.max_pers_counts = self.persistence_dur / self.on_timer_dur
         self.persisted_scores_weight = 1
@@ -133,6 +130,8 @@ class TreeFinder:
         self.trunc_factor = 10 ** 5
 
         self.all_p1 = np.zeros(0)
+
+        self.intersect_pub_array = np.zeros(0)
 
         #TODO organize init, and add a section of all things can tune
 
@@ -156,6 +155,11 @@ class TreeFinder:
 
         # Topic super takes
         self.pub_super = rospy.Publisher("/super/goal", PoseStamped, queue_size = 10) 
+
+        #Timer
+        rospy.Timer(rospy.Duration(self.on_timer_dur), self.on_timer)  # 10 Hz
+
+        rospy.Timer(rospy.Duration(self.persistence_dur), self.persistence_timer)  # 1 Hz
 
         
 
@@ -301,9 +305,15 @@ class TreeFinder:
                     self.clustered_cloud_list.append(self.xy[labels != -1])
                     # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
 
-                    for clustnum in range(n_clusters-1):
+                    for clustnum in range(n_clusters):
                         curr_clust = self.xy[labels == clustnum]
                         # print("\n------HERE is curr_clust: ", curr_clust, "\n")
+
+                        #A 0 or 1 pt cluster has no shape to measure, and would otherwise
+                        #register as a tree candidate with rms 0. Not a real cluster, skip.
+                        if curr_clust.shape[0] < 2:
+                            continue
+
                         xmean = np.mean(curr_clust[:,0])
                         ymean = np.mean(curr_clust[:,1])
 
@@ -440,11 +450,13 @@ class TreeFinder:
             # print("\n------INSIDE EIGEN------")
             # print("xmean: ", xmean)
             # print("ymean: ", ymean, "\n")
-            if curr_clust.size != 0:
-            
+            #np.cov ignores rowvar=False on a single-row array, collapsing to a 0-d
+            #scalar that np.linalg.eig rejects. Need >= 2 points for a covariance anyway.
+            if curr_clust.shape[0] >= 2:
+
                 normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
                 # print("HERE is normalized shape: ", normalized.shape)
-        
+
                 cov_matrix = np.cov(normalized, rowvar = False)
                 #  print("HERE is cov matrix: ", cov_matrix)
                 #  print("HERE is cov matrix shape: ", cov_matrix.shape)
@@ -462,8 +474,11 @@ class TreeFinder:
                 # print("HERE is ver_rms: ", ver_rms)
                 # print("HERE is elong: ", elongation_num)
         
-                return hor_rms, ver_rms, elongation_num  
-    
+                return hor_rms, ver_rms, elongation_num
+
+            #Degenerate cluster (0 or 1 pts): no spread to measure
+            return 0.0, 0.0, 0.0
+
     def is_line(self, hor_rms, elongation_num):
         """!@brief Determines if a cluster is line shaped based on horizontal RMS and elongation number.
             @return True if the cluster is line shaped, False otherwise."""
@@ -671,14 +686,14 @@ class TreeFinder:
             #Quantizing persisted to allow for more silimarity checks for bookkeeping
             qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, persisted[:,3])) #Adding the count col. back on after quantization
 
-            print("HERE is qpersisted, fresh q: ", qpersisted)
+            # print("HERE is qpersisted, fresh q: ", qpersisted)
             
             #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
             # if self.qbeen.size > 0:
             print("HERE is self.qbeen: ", self.qbeen)
             #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
             in_mask = np.isin(qpersisted[:,0:2], self.qbeen).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows #TODO using the false hits on notin_mask, add logic to if the counts better replace
-            print("here is the fresh in_mask foor fresh scans", in_mask)
+            # print("here is the fresh in_mask foor fresh scans", in_mask)
             # if self.qbeen.size > 0:
             #     #TODO Quantize?
             #     in_all_mask = np.isin(self.all_persisted_array, self.qbeen).all(axis = 1)
@@ -711,6 +726,7 @@ class TreeFinder:
             #Publishing stuff:
             const_z_height = np.ones((self.all_persisted_array.shape[0], 1)) * 1.67
             self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
+
             # print(self.pub_persisted_array)
 
     def hasbeenhere(self):
@@ -768,18 +784,74 @@ class TreeFinder:
             #Creating another boolean mask for valid lines
             valid = (nonpar) & (t[:,0] >=-2) & (t[:,1] >= -2) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
 
-            print("HERE is p1[valid]: ", p1[valid])
-            print("HERE is p2[valid]: ", p2[valid], "\n")
-
             self.make_lines()
 
-            #TODO make an not is in mask for1st two col of self.allpersisited array and p1, this we then filter self.persisited array with yay
             # self.all_p1 = np.vstackp1[valid or par_mask]
-            p1par_allmask = np.vstack((p1[valid], p1par[par_mask]))
+            #long list of all paired points that are deemed the same
 
-            notin_mask = np.isin(self.all_persisted_array[:,0:2], p1par_allmask, invert = True).all(axis = 1)
-            print("I AM HERE HAVING")
-            self.all_persisted_array = self.all_persisted_array[notin_mask]
+            p1par_all = np.vstack((p1[valid], p1par[par_mask]))
+            p2par_all = np.vstack((p2[valid], p2par[par_mask]))
+
+            print("HERE is p1[valid]: ", p1[valid])
+            print("HERE is p2[valid]: ", p2[valid], "\n")
+            print("HERE is p1par_all: ", p1par_all)
+            print("HERE is p2par_all: ", p2par_all, "\n")
+
+            intersect_pub_array = (p1par_all + p2par_all) / 2
+            const_z_height = np.ones((intersect_pub_array.shape[0], 1)) * 2.67
+            if self.pub_persisted_array.shape != (0,):
+                self.intersect_pub_array = np.vstack((self.intersect_pub_array,np.column_stack((intersect_pub_array , const_z_height))))
+            else:
+                self.intersect_pub_array = np.column_stack((intersect_pub_array , const_z_height))
+
+
+            
+            print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
+
+            in_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all).all(axis = 1)
+            in_mask2 = np.isin(self.all_persisted_array[:,0:2], p2par_all).all(axis = 1)
+            print("HERE Is the shape of inmask1,size shold b same as apa: ", in_mask1.shape)
+            print("HERE Is the shape of inmask2: ", in_mask2.shape, "\n")
+            
+            # p1_inds = np.where(in_mask1)[0]
+            # p2_inds = np.where(in_mask2)[0]
+            # print("HERE Is the shape of p1inds: ", p1_inds.shape)
+            # print("HERE Is the shape of p2inds: ", p2_inds.shape, "\n")
+            
+            if self.all_persisted_array[in_mask1].size != 0 or self.all_persisted_array[in_mask2].size != 0:
+                print("HERE Is the shape of p1: ", self.all_persisted_array[in_mask1][:,4].shape)
+                print("HERE Is the shape of p2: ", self.all_persisted_array[in_mask2][:,4].shape, "\n")
+                new_bool_col = np.logical_or(self.all_persisted_array[in_mask1][:,4], self.all_persisted_array[in_mask2][:,4])
+
+                self.all_persisted_array[in_mask1][:,4] = new_bool_col 
+                self.all_persisted_array[in_mask2][:,4] = new_bool_col 
+
+            print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
+
+
+            # notin_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all, invert = True).all(axis = 1)
+            # notin_mask2 = np.isin(self.all_persisted_array[:,0:2], p2par_all, invert = True).all(axis = 1)
+
+
+            # print("HERE is self.apa BEFORE hes: ", self.all_persisted_array)
+            # #TODO this will just get rid of past lines. WANT: to only flip that last been col to 1 if one of em has
+            # #self.all_persisted_array = self.all_persisted_array[notin_mask]
+
+            # print("HERE is self.apa AFTER hes: ", self.all_persisted_array)
+
+            # #Seeing if one that relates to dfi side same tree, had the 4th col marked as a 1, this means we have to mark the that one as a 1 too
+            # in_mask = ~notin_mask
+            # qp1par_all = np.floor( p1par_all / self.tol) * self.tol
+            # qapa = np.floor(self.all_persisted_array / self.tol) * self.tol
+
+            # p1_and_p2 = self.all_persisted_array[in_mask]
+            # indices = np.where(self.all_persisted_array == p1_and_p2) #check my size is same as self.apa
+
+            # cor_been = self.all_persisted_array[indices] == 
+
+            
+
+
 
 
             #TODO MAYBE: right after, see if the intersected mask, the correlated one in p2, is intersecting any other points, as that will mean probably that centroid also same tree
@@ -788,7 +860,7 @@ class TreeFinder:
     def persist_bookkeeping(self, qpersisted, persisted):
         """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to"""
         #self.all_persisted_array is a global persisted numpy array. Reminder: (N,4). Col's x, y, angle, count, been.
-        print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
+        # print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
 
         if persisted.size != 0 :
             persisted = np.trunc(persisted * self.trunc_factor) / self.trunc_factor
@@ -813,9 +885,9 @@ class TreeFinder:
         # qpersisted_array = np.floor(persisted_array / self.tol) * self.tol 
 
         not_been_mask = persisted_array_all[:,4] == 0
-        print("not beeen here yet mask in the scoring: " , not_been_mask)
+        # print("not beeen here yet mask in the scoring: " , not_been_mask)
         persisted_array = persisted_array_all[not_been_mask]
-        print("not beeen here persisted array fro scoring " , persisted_array) 
+        # print("not beeen here persisted array fro scoring " , persisted_array) 
 
         persisted_counts = persisted_array[:, 3] #TODO changed to 4th col
         persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
@@ -981,6 +1053,10 @@ class TreeFinder:
         if self.pub_persisted_array.shape != (0,):
             persisted_dots = make_pointcloud2_xyz32(header, self.pub_persisted_array)
             self.pub_persisted.publish(persisted_dots)
+
+        if self.intersect_pub_array.shape != (0,):
+            inter_dots = make_pointcloud2_xyz32(header, self.intersect_pub_array)
+            self.pub_intersect.publish(inter_dots)
 
         # if self.hlines != None:
         if len(self.hlines):
