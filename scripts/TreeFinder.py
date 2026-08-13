@@ -127,7 +127,7 @@ class TreeFinder:
         self.qbeen = np.zeros(0)
 
         self.linelen = 2
-        self.backlen = 0.33
+        self.backlen = 0.5
         self.hlines = []
 
         self.freq_percent = 0.5
@@ -759,18 +759,19 @@ class TreeFinder:
             det = matrixA[:, 0, 0] * matrixA[:, 1, 1] - matrixA[:, 0, 1] * matrixA[:, 1, 0]
 
             #Create boolean mask for non par. lines
-            nonpar = np.abs(det) > 1e-10
+            nonpar = np.abs(det) > 0.001
 
 
             #parrallel case, do min distance from d1 vector normal
             parallel = ~nonpar
+            print("parallel mask: ", parallel)
             d1par = d1[parallel]
             p1par = p1[parallel]
             p2par = p2[parallel]
             n = np.column_stack((-d1par[:, 1], d1par[:, 0]))
-
             parallel_dist = np.abs(np.sum((p2par - p1par) * n, axis=1))
-
+            print("parallel_dist: " , parallel_dist)
+            self.make_perplines((p2par - p1par) * n,1,p1par)
             par_mask = parallel_dist < 1 #TODO MAKE ME GLOBAL TUNABLE BUDDY 
 
 
@@ -813,7 +814,7 @@ class TreeFinder:
 
 
             
-            print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
+            # print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
 
             # in_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all).all(axis = 1)
             # in_mask2 = np.isin(self.all_persisted_array[:,0:2], p2par_all).all(axis = 1)
@@ -827,8 +828,8 @@ class TreeFinder:
             if p1par_all.size != 0 and p2par_all.size != 0:
                 for x in range(p1par_all.shape[0]):
                     # if np.any(self.all_persisted_array == p1par_all[x]) and np.any(self.all_persisted_array == p2par_all[x]):
-                    print("HEREEE is p1par[x]: ", p1par_all[x])
-                    print("HEREEE is p2par[x]: ", p2par_all[x])
+                    # print("HEREEE is p1par[x]: ", p1par_all[x])
+                    # print("HEREEE is p2par[x]: ", p2par_all[x])
 
                     index1 = np.where(np.all(self.all_persisted_array[:,0:2] == p1par_all[x], axis=1))[0][0]
                     index2 = np.where(np.all(self.all_persisted_array[:,0:2] == p2par_all[x], axis=1))[0][0]
@@ -836,58 +837,22 @@ class TreeFinder:
                     ind_list1.append(index1)
                     ind_list2.append(index2)
 
-                
-            # p1_inds = np.where(in_mask1)[0]
-            # p2_inds = np.where(in_mask2)[0]
-            # print("HERE Is the shape of p1inds: ", p1_inds.shape)
-            # print("HERE Is the shape of p2inds: ", p2_inds.shape, "\n")
-            #TODO have to impleent a for loop ,
-            # the in_mask bool mask wont work to populate indices of the points that we want to, 
-            # if there is a duplicate inside of p1parall or p2par_all
-            print("HERE is in_list1: ", ind_list1)
-            print("size of allpersistedarray[indlist1] out o the loop", self.all_persisted_array[ind_list1, :])
-
-            print("HERE is in_list2: ", ind_list2)
-            print("size of allpersistedarray[indlist2] out o the loop", self.all_persisted_array[ind_list2, :])
+            # print("HERE is in_list2: ", ind_list2)
+            # print("size of allpersistedarray[indlist2] out o the loop", self.all_persisted_array[ind_list2, :])
 
             if self.all_persisted_array[ind_list1].size != 0 or self.all_persisted_array[ind_list2].size != 0:
-                print("HERE Is the shape of p1: ", self.all_persisted_array[ind_list1][:,4].shape)
-                print("HERE Is the shape of p2: ", self.all_persisted_array[ind_list2][:,4].shape, "\n")
+                # print("HERE Is the shape of p1: ", self.all_persisted_array[ind_list1][:,4].shape)
+                # print("HERE Is the shape of p2: ", self.all_persisted_array[ind_list2][:,4].shape, "\n")
 
-                print("HERE is p1 col: ", self.all_persisted_array[ind_list1][:,4])
-                print("HERE is p2 col: ", self.all_persisted_array[ind_list2][:,4])
+                # print("HERE is p1 col: ", self.all_persisted_array[ind_list1][:,4])
+                # print("HERE is p2 col: ", self.all_persisted_array[ind_list2][:,4])
                 new_bool_col = np.logical_or(self.all_persisted_array[ind_list1][:,4], self.all_persisted_array[ind_list2][:,4])
-                print("HERE is new bool col: ", new_bool_col)
+                # print("HERE is new bool col: ", new_bool_col)
 
                 self.all_persisted_array[ind_list1, 4] = new_bool_col.astype(np.float32)
                 self.all_persisted_array[ind_list2, 4] = new_bool_col.astype(np.float32)
 
-            print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array, "\n")
-
-
-            # notin_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all, invert = True).all(axis = 1)
-            # notin_mask2 = np.isin(self.all_persisted_array[:,0:2], p2par_all, invert = True).all(axis = 1)
-
-
-            # print("HERE is self.apa BEFORE hes: ", self.all_persisted_array)
-            # #TODO this will just get rid of past lines. WANT: to only flip that last been col to 1 if one of em has
-            # #self.all_persisted_array = self.all_persisted_array[notin_mask]
-
-            # print("HERE is self.apa AFTER hes: ", self.all_persisted_array)
-
-            # #Seeing if one that relates to dfi side same tree, had the 4th col marked as a 1, this means we have to mark the that one as a 1 too
-            # in_mask = ~notin_mask
-            # qp1par_all = np.floor( p1par_all / self.tol) * self.tol
-            # qapa = np.floor(self.all_persisted_array / self.tol) * self.tol
-
-            # p1_and_p2 = self.all_persisted_array[in_mask]
-            # indices = np.where(self.all_persisted_array == p1_and_p2) #check my size is same as self.apa
-
-            # cor_been = self.all_persisted_array[indices] == 
-
-            
-
-
+            # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array, "\n")
 
 
             #TODO MAYBE: right after, see if the intersected mask, the correlated one in p2, is intersecting any other points, as that will mean probably that centroid also same tree
@@ -1038,6 +1003,19 @@ class TreeFinder:
                 self.hlines.append(line * vec[i] + self.all_persisted_array[i,0:2])
         #TODO publish
 
+    def make_perplines(self,vec,length,p1par):
+        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
+
+        if vec.shape != (0,):
+            # i thiiink thats what ths is
+            line = np.linspace(-length,length,50)[:,np.newaxis]
+
+            # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
+            # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
+
+            for i in range(vec.shape[0]):
+                self.hlines.append(line * vec[i] + p1par)
+
 #---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
     def publ(self):
         """!@brief"""
@@ -1068,6 +1046,9 @@ class TreeFinder:
         if self.intersect_pub_array.shape != (0,):
             inter_dots = make_pointcloud2_xyz32(header, self.intersect_pub_array)
             self.pub_intersect.publish(inter_dots)
+
+
+
 
         # if self.hlines != None:
         if len(self.hlines):
