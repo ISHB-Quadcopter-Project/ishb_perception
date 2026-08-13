@@ -23,6 +23,11 @@ from common import *
 
 from geometry_msgs.msg import PoseStamped
 
+import warnings
+# Suppress the specific NumPy multidimensional indexing warning
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*non-tuple sequence.*")
+
+
 
 
 #TODO We want to do two things A) find poss trees B) sep class at least, goes up to poss tree, and estimates radius, and reonsiders dist from tree for cam, and reconsiders tree placements
@@ -765,7 +770,7 @@ class TreeFinder:
 
             parallel_dist = np.abs(np.sum((p2par - p1par) * n, axis=1))
 
-            par_mask = parallel_dist < 0.67 #TODO MAKE ME GLOBAL TUNABLE BUDDY 
+            par_mask = parallel_dist < 1 #TODO MAKE ME GLOBAL TUNABLE BUDDY 
 
 
 
@@ -782,20 +787,21 @@ class TreeFinder:
             # print("HERE is len of lines: ", t)
 
             #Creating another boolean mask for valid lines
-            valid = (nonpar) & (t[:,0] >=-2) & (t[:,1] >= -2) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
+            valid = (nonpar) & (t[:,0] >= 0) & (t[:,1] >= 0) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
 
             self.make_lines()
 
             # self.all_p1 = np.vstackp1[valid or par_mask]
             #long list of all paired points that are deemed the same
 
+            #For publishing if they intersect, pink dots
             p1par_all = np.vstack((p1[valid], p1par[par_mask]))
             p2par_all = np.vstack((p2[valid], p2par[par_mask]))
 
-            print("HERE is p1[valid]: ", p1[valid])
-            print("HERE is p2[valid]: ", p2[valid], "\n")
-            print("HERE is p1par_all: ", p1par_all)
-            print("HERE is p2par_all: ", p2par_all, "\n")
+            # print("HERE is p1[valid]: ", p1[valid])
+            # print("HERE is p2[valid]: ", p2[valid], "\n")
+            # print("HERE is p1par_all: ", p1par_all)
+            # print("HERE is p2par_all: ", p2par_all, "\n")
 
             intersect_pub_array = (p1par_all + p2par_all) / 2
             const_z_height = np.ones((intersect_pub_array.shape[0], 1)) * 2.67
@@ -808,25 +814,54 @@ class TreeFinder:
             
             print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
 
-            in_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all).all(axis = 1)
-            in_mask2 = np.isin(self.all_persisted_array[:,0:2], p2par_all).all(axis = 1)
-            print("HERE Is the shape of inmask1,size shold b same as apa: ", in_mask1.shape)
-            print("HERE Is the shape of inmask2: ", in_mask2.shape, "\n")
-            
+            # in_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all).all(axis = 1)
+            # in_mask2 = np.isin(self.all_persisted_array[:,0:2], p2par_all).all(axis = 1)
+            # print("HERE Is the shape of inmask1,size shold b same as apa: ", in_mask1.shape)
+            # print("HERE Is the shape of inmask2: ", in_mask2.shape, "\n")
+
+            #TODO for loop time
+            ind_list1 = []
+            ind_list2 = []
+
+            if p1par_all.size != 0 and p2par_all.size != 0:
+                for x in range(p1par_all.shape[0]):
+                    # if np.any(self.all_persisted_array == p1par_all[x]) and np.any(self.all_persisted_array == p2par_all[x]):
+                    print("HEREEE is p1par[x]: ", p1par_all[x])
+                    print("HEREEE is p2par[x]: ", p2par_all[x])
+
+                    index1 = np.where(np.all(self.all_persisted_array[:,0:2] == p1par_all[x], axis=1))[0][0]
+                    index2 = np.where(np.all(self.all_persisted_array[:,0:2] == p2par_all[x], axis=1))[0][0]
+
+                    ind_list1.append(index1)
+                    ind_list2.append(index2)
+
+                
             # p1_inds = np.where(in_mask1)[0]
             # p2_inds = np.where(in_mask2)[0]
             # print("HERE Is the shape of p1inds: ", p1_inds.shape)
             # print("HERE Is the shape of p2inds: ", p2_inds.shape, "\n")
-            
-            if self.all_persisted_array[in_mask1].size != 0 or self.all_persisted_array[in_mask2].size != 0:
-                print("HERE Is the shape of p1: ", self.all_persisted_array[in_mask1][:,4].shape)
-                print("HERE Is the shape of p2: ", self.all_persisted_array[in_mask2][:,4].shape, "\n")
-                new_bool_col = np.logical_or(self.all_persisted_array[in_mask1][:,4], self.all_persisted_array[in_mask2][:,4])
+            #TODO have to impleent a for loop ,
+            # the in_mask bool mask wont work to populate indices of the points that we want to, 
+            # if there is a duplicate inside of p1parall or p2par_all
+            print("HERE is in_list1: ", ind_list1)
+            print("size of allpersistedarray[indlist1] out o the loop", self.all_persisted_array[ind_list1, :])
 
-                self.all_persisted_array[in_mask1][:,4] = new_bool_col 
-                self.all_persisted_array[in_mask2][:,4] = new_bool_col 
+            print("HERE is in_list1: ", ind_list1)
+            print("size of allpersistedarray[indlist1] out o the loop", self.all_persisted_array[ind_list1, :])
 
-            print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
+            if self.all_persisted_array[ind_list1].size != 0 or self.all_persisted_array[ind_list2].size != 0:
+                print("HERE Is the shape of p1: ", self.all_persisted_array[ind_list1][:,4].shape)
+                print("HERE Is the shape of p2: ", self.all_persisted_array[ind_list2][:,4].shape, "\n")
+
+                print("HERE is p1 col: ", self.all_persisted_array[ind_list1][:,4])
+                print("HERE is p2 col: ", self.all_persisted_array[ind_list2][:,4])
+                new_bool_col = np.logical_or(self.all_persisted_array[ind_list1][:,4], self.all_persisted_array[ind_list2][:,4])
+                print("HERE is new bool col: ", new_bool_col)
+
+                self.all_persisted_array[ind_list1][:,4] = new_bool_col.astype(np.float32) 
+                self.all_persisted_array[ind_list2][:,4] = new_bool_col.astype(np.float32) 
+
+            print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array, "\n")
 
 
             # notin_mask1 = np.isin(self.all_persisted_array[:,0:2], p1par_all, invert = True).all(axis = 1)
@@ -874,11 +909,12 @@ class TreeFinder:
                 print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
-        print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
+        # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
 
     def scoring_func(self, persisted_array_all):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
         #TODO add score for zig zag waypts, and condiitonal to defult to zig zag path is nothing in self.all_persisted_array
+        print("I AM HAVINGGGGGGG")
         if persisted_array_all.size == 0:
             print("--------I AM NOT HAVING TRESS!--------")
 
