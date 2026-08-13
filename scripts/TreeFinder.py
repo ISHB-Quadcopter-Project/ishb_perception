@@ -127,6 +127,7 @@ class TreeFinder:
         self.qbeen = np.zeros(0)
 
         self.linelen = 2
+        self.backlen = 0.33
         self.hlines = []
 
         self.freq_percent = 0.5
@@ -787,7 +788,7 @@ class TreeFinder:
             # print("HERE is len of lines: ", t)
 
             #Creating another boolean mask for valid lines
-            valid = (nonpar) & (t[:,0] >= 0) & (t[:,1] >= 0) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
+            valid = (nonpar) & (t[:,0] >= -self.backlen) & (t[:,1] >= -self.backlen) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
 
             self.make_lines()
 
@@ -846,8 +847,8 @@ class TreeFinder:
             print("HERE is in_list1: ", ind_list1)
             print("size of allpersistedarray[indlist1] out o the loop", self.all_persisted_array[ind_list1, :])
 
-            print("HERE is in_list1: ", ind_list1)
-            print("size of allpersistedarray[indlist1] out o the loop", self.all_persisted_array[ind_list1, :])
+            print("HERE is in_list2: ", ind_list2)
+            print("size of allpersistedarray[indlist2] out o the loop", self.all_persisted_array[ind_list2, :])
 
             if self.all_persisted_array[ind_list1].size != 0 or self.all_persisted_array[ind_list2].size != 0:
                 print("HERE Is the shape of p1: ", self.all_persisted_array[ind_list1][:,4].shape)
@@ -858,8 +859,8 @@ class TreeFinder:
                 new_bool_col = np.logical_or(self.all_persisted_array[ind_list1][:,4], self.all_persisted_array[ind_list2][:,4])
                 print("HERE is new bool col: ", new_bool_col)
 
-                self.all_persisted_array[ind_list1][:,4] = new_bool_col.astype(np.float32) 
-                self.all_persisted_array[ind_list2][:,4] = new_bool_col.astype(np.float32) 
+                self.all_persisted_array[ind_list1, 4] = new_bool_col.astype(np.float32)
+                self.all_persisted_array[ind_list2, 4] = new_bool_col.astype(np.float32)
 
             print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array, "\n")
 
@@ -1028,40 +1029,14 @@ class TreeFinder:
 
         if vec.shape != (0,):
             length = self.linelen # i thiiink thats what ths is
-            line = np.linspace(0,length,50)[:,np.newaxis]
+            line = np.linspace(-self.backlen,length,50)[:,np.newaxis]
 
             # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
             # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
 
             for i in range(vec.shape[0]):
                 self.hlines.append(line * vec[i] + self.all_persisted_array[i,0:2])
-
-
-            
-
-        
-
-
-
-
-
-
-        #Performs broadcasting to the (20,1) and (3,) vectors, to allow for use of vectozied element-wise multiplication. Centroid it added so the line starts at the correct tree.
-        # z = np.ones(vec.shape[0],1) * 0.67
-        # withz = np.cloumn_stack((self.all_persisted_array[:,0:2],z))
-
-        # print("HERE is shape sdfhslfgdhsg: ", self.all_persisted_array[:,0:2])
-        # print("HERE is shape ofmulticpation: ",(vec @ stacked_line))
-
-        # self.hlines = (vec @ stacked_line) + self.all_persisted_array[:,0:2]
-        # print("HERE is hlines: ", self.hlines)
-        # print("HERE is hlines shape: ", self.hlines.shape, "\n")
-
-        #Whether the line passing verticality test, append it to the corresponding publishing list
         #TODO publish
-
-    #TODO Filtering func. This will call PCA func, take the outputed numpy array (either reutnr of make global idk yet), and pass into PCA func. This willl then
-    #take the poential trees PCA said aren't trees, and filter the cand_trees (or make a new list) accordingly
 
 #---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
     def publ(self):
