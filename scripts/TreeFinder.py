@@ -123,7 +123,42 @@ class TreeFinder:
         self.persisted_scores_weight = 1
         self.norms_scores_weight = 1
 
-        self.all_persisted_array = np.zeros(0)
+        #TODO 1) add zz pts artifically
+        self.all_persisted_array = np.array([
+            [0.0,   0.0,    0.0, -1.0, 0.0],
+            [2.0,  -1.833,  0.0, -2.0, 0.0],
+            [4.0,  -3.667,  0.0, -3.0, 0.0],
+            [6.0,  -5.5,    0.0, -4.0, 0.0],
+            [8.0,  -7.333,  0.0, -5.0, 0.0],
+            [10.0, -9.167,  0.0, -6.0, 0.0],
+            [12.0, -11.0,   0.0, -7.0, 0.0],
+            [14.0, -8.833,  0.0, -8.0, 0.0],
+            [16.0, -6.667,  0.0, -9.0, 0.0],
+            [18.0, -4.5,    0.0, -10.0, 0.0],
+            [20.0, -2.333,  0.0, -11.0, 0.0],
+            [22.0, -0.167,  0.0, -12.0, 0.0],
+            [24.0,  2.0,    0.0, -13.0, 0.0],
+            [26.0, -0.167,  0.0, -14.0, 0.0],
+            [28.0, -2.333,  0.0, -15.0, 0.0],
+            [30.0, -4.5,    0.0, -16.0, 0.0],
+            [32.0, -6.667,  0.0, -17.0, 0.0],
+            [34.0, -8.833,  0.0, -18.0, 0.0],
+            [36.0, -11.0,   0.0, -19.0, 0.0],
+            [38.0, -8.833,  0.0, -20.0, 0.0],
+            [40.0, -6.667,  0.0, -21.0, 0.0],
+            [42.0, -4.5,    0.0, -22.0, 0.0],
+            [44.0, -2.333,  0.0, -23.0, 0.0],
+            [46.0, -0.167,  0.0, -24.0, 0.0],
+            [48.0,  2.0,    0.0, -25.0, 0.0]
+        ], dtype=np.float32)
+
+        self.waypoint_index = 0
+
+        self.per_waypt_weight = 1.0
+        self.norm_waypt_weight = 1.0
+
+        self.zztop = rospy.Publisher('ZZTOP', Marker, queue_size=10)
+        
         self.qbeen = np.zeros(0)
 
         self.linelen = 2
@@ -140,16 +175,6 @@ class TreeFinder:
         self.intersect_pub_array = np.zeros(0)
 
         #TODO organize init, and add a section of all things can tune
-
-        # self.zzpoints = np.array([
-        #     [0, 0], [12, 19], [24, 0], [36, 19], [48, 0], [60, 19], [72, 0],
-        #     [2, 3.167], [4, 6.333], [6, 9.5], [8, 12.667], [10, 15.833],
-        #     [14, 15.833], [16, 12.667], [18, 9.5], [20, 6.333], [22, 3.167],
-        #     [26, 3.167], [28, 6.333], [30, 9.5], [32, 12.667], [34, 15.833],
-        #     [38, 15.833], [40, 12.667], [42, 9.5], [44, 6.333], [46, 3.167],
-        #     [50, 3.167], [52, 6.333], [54, 9.5], [56, 12.667], [58, 15.833],
-        #     [62, 15.833], [64, 12.667], [66, 9.5], [68, 6.333], [70, 3.167],
-        # ], dtype=np.float32)
 
         #Odom var to hold the x,y,z odom data
         self.latest_pos = None
@@ -734,18 +759,21 @@ class TreeFinder:
             self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
 
             # print(self.pub_persisted_array)
-
+    
     def hasbeenhere(self):
-        if len(self.all_persisted_array):
+        if len(self.all_persisted_array) > 25:
             #Direcctions of the angles in polar
-            dirs = np.column_stack((np.cos(self.all_persisted_array[:,2]), np.sin(self.all_persisted_array[:,2])))
+            waypts_mask = self.all_persisted_array[:,3] < 0
+            not_waypts = ~waypts_mask
+            trees = self.all_persisted_array[not_waypts]
+            dirs = np.column_stack((np.cos(trees[:,2]), np.sin(trees[:,2])))
 
             #chooses the upper triangle 1 diag above the main diag, to choose which where i and j are pairs we check against each other, wihtout repeating ourselves
-            i, j = np.triu_indices(self.all_persisted_array.shape[0],k=1) #i and j are lists
+            i, j = np.triu_indices(trees.shape[0],k=1) #i and j are lists
 
-            #Indexes self.all_persisted_array for the cenriod x,y, and only at the trianlge indices to creates unique pairs for all poss lines
-            p1 = self.all_persisted_array[:,0:2][i]
-            p2 = self.all_persisted_array[:,0:2][j]
+            #Indexes trees for the cenriod x,y, and only at the trianlge indices to creates unique pairs for all poss lines
+            p1 = trees[:,0:2][i]
+            p2 = trees[:,0:2][j]
 
             #Indexes the polar directions only at triangle indices
             d1 = dirs[i]
@@ -787,7 +815,7 @@ class TreeFinder:
             t[nonpar] = np.linalg.solve(matrixA[nonpar], b[nonpar])
 
             # print("HERE is len of lines: ", t)
-
+            print("i am t : :----", t)
             #Creating another boolean mask for valid lines
             valid = (nonpar) & (t[:,0] >= -self.backlen) & (t[:,1] >= -self.backlen) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
 
@@ -866,11 +894,15 @@ class TreeFinder:
         if persisted.size != 0 :
             persisted = np.trunc(persisted * self.trunc_factor) / self.trunc_factor
 
-        if self.all_persisted_array.shape == (0,):
-            self.all_persisted_array = persisted
+        #TODO 2) check if exact same size starrted with
+        if self.all_persisted_array.shape == (25,):
+            self.all_persisted_array = np.vstack((self.all_persisted_array, persisted))
         else:
+            #Only bookkeeping on trees, not waypts
+            not_waypts = self.all_persisted_array[:,2] > 0
+
             #Checking if quantized persisted are alreadly in quantized self.all_persisted_array. Note: We use quantized since we are doing simliarity checks.
-            notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array / self.tol) * self.tol, invert = True).all(axis = 1)
+            notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array[not_waypts] / self.tol) * self.tol, invert = True).all(axis = 1)
             if qpersisted[:,0:2][notin_mask].size != 0:
                 print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
@@ -879,28 +911,39 @@ class TreeFinder:
 
     def scoring_func(self, persisted_array_all):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
-        #TODO add score for zig zag waypts, and condiitonal to defult to zig zag path is nothing in self.all_persisted_array
+        #TODO 3) make boool mask for neg counts to filter do normal or scoreing a waypt (dif scoring)
         print("I AM HAVINGGGGGGG")
         if persisted_array_all.size == 0:
             print("--------I AM NOT HAVING TRESS!--------")
 
-        # qpersisted_array = np.floor(persisted_array / self.tol) * self.tol 
+        waypts_mask = persisted_array_all[:,3] < 0
+        not_waypts = ~waypts_mask
 
         not_been_mask = persisted_array_all[:,4] == 0
-        # print("not beeen here yet mask in the scoring: " , not_been_mask)
-        persisted_array = persisted_array_all[not_been_mask]
-        # print("not beeen here persisted array fro scoring " , persisted_array) 
 
-        persisted_counts = persisted_array[:, 3] #TODO changed to 4th col
+        #-----Normal persistence scoring----
+        trees = persisted_array_all[not_waypts & not_been_mask]
+
+        persisted_counts = trees[:, 3]
         persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
-        # print("HERE is count_scores: ", persisted_scores)
+
+
+        #-----Waypt persistence scoring----
+        waypts = persisted_array_all[waypts_mask & not_been_mask]
+
+        #Since we filter ones alr been to, can just pick first one (and will always want to go sequentially)
+        waypt = waypts[0] #TODO change when we dont hardcode zigzag anymore,and use index give by count column
+        waypt_persistence_score = self.max_pers_counts * self.per_waypt_weight
+        persisted_scores = np.append(persisted_scores,waypt_persistence_score) #Adding the waypoint maxed per score at bottom, so know its a waypt
+
 
         if self.is_odom:
+            #-----Normal dist scoring----
             drone_x = self.latest_pos.x
             drone_y = self.latest_pos.y
 
-            x_dist = persisted_array[:, 0] - drone_x
-            y_dist = persisted_array[:, 1] - drone_y
+            x_dist = trees[:, 0] - drone_x
+            y_dist = trees[:, 1] - drone_y
 
             xy_dist = np.column_stack((x_dist, y_dist))
 
@@ -908,16 +951,36 @@ class TreeFinder:
             norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
             # print("HER is norm_score: ", norms_score)
 
+
+            #-----Waypt dist scoring----
+            wx_dist = waypt[ 0] - drone_x
+            wy_dist = waypt[1] - drone_y
+
+            wxy_dist = np.column_stack((wx_dist, wy_dist))
+
+            wnorm = np.linalg.norm(wxy_dist, axis = 1)
+            wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
+            norms_score = np.append(norms_score, wnorms_score)
+
+
+
             #Assesment, whichever linear combination is highest 
             assesment = persisted_scores - norms_score
             # print("HERE is asses: ", assesment)
 
             #Finding the index of the max_score, this will be the tree we go to
             max_index = np.argmax(assesment)
+
+            #TODO Add conditional see if max_index == last row (shape[0]) --> means a waypt!
             # print("HERE is max_indx: ", max_index)
-            print("HERE IS Where to go: ", persisted_array[max_index, 0:2])
-            to_go = persisted_array[max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
-            self.to_go(to_go)
+            if max_index == assesment.shape[0]-1:
+                print("HERE IS Where to go for a WAYPOINT: ", waypt[0:2])
+                to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
+                self.to_go(to_go)
+            else:
+                print("HERE IS Where to go for a TREE: ", trees[max_index, 0:2])
+                to_go = trees[max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
+                self.to_go(to_go)
 
             self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
 
@@ -972,6 +1035,11 @@ class TreeFinder:
             qall_persisted_array = np.floor(self.all_persisted_array / self.tol) * self.tol
 
             row,cols = np.where(qall_persisted_array[:,0:2] == qto_go)
+            # print("self.all_persisted_array[row,3] : ::: : :: : :", self.all_persisted_array[row,3])
+            # if self.all_persisted_array[row,3].all(axis = 1) < 0:
+            #     print("------GOING TO WAYPOINT-----")
+            #     self.waypoint_index += 1
+
             self.all_persisted_array[row, 4] = 1.0
 
             if self.qbeen.size > 0:
@@ -990,7 +1058,11 @@ class TreeFinder:
 
     def make_lines(self):
         """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
-        vec = np.column_stack((np.cos(self.all_persisted_array[:,2]), np.sin(self.all_persisted_array[:,2])))
+        waypts_mask = self.all_persisted_array[:,3] < 0
+        not_waypts = ~waypts_mask
+        trees = self.all_persisted_array[not_waypts]
+
+        vec = np.column_stack((np.cos(trees[:,2]), np.sin(trees[:,2])))
 
         if vec.shape != (0,):
             length = self.linelen # i thiiink thats what ths is
@@ -1000,21 +1072,21 @@ class TreeFinder:
             # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
 
             for i in range(vec.shape[0]):
-                self.hlines.append(line * vec[i] + self.all_persisted_array[i,0:2])
+                self.hlines.append(line * vec[i] + trees[i,0:2])
         #TODO publish
 
     def make_perplines(self,vec,length,p1par):
         """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
+        pass
+        # if vec.shape != (0,):
+        #     # i thiiink thats what ths is
+        #     line = np.linspace(-length,length,50)[:,np.newaxis]
 
-        if vec.shape != (0,):
-            # i thiiink thats what ths is
-            line = np.linspace(-length,length,50)[:,np.newaxis]
+        #     # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
+        #     # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
 
-            # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
-            # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
-
-            for i in range(vec.shape[0]):
-                self.hlines.append(line * vec[i] + p1par)
+        #     for i in range(vec.shape[0]):
+        #         self.hlines.append(line * vec[i] + p1par)
 
 #---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
     def publ(self):
@@ -1058,6 +1130,64 @@ class TreeFinder:
             line_stacked_with_z = np.column_stack((line_stacked,z_ones))
             hline_cloud = make_pointcloud2_xyz32(header, line_stacked_with_z)
             self.pub_hespline.publish(hline_cloud)
+
+
+        #Zig Zag visualizing
+        marker = Marker()
+        marker.header = header
+        marker.ns = "lines"
+        marker.id = 0
+        
+        # LINE_STRIP connects vertex 0->1, 1->2, etc.
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        
+        # Scale determines the line width
+        marker.scale.x = 0.5 
+        
+        # Color (RGBA)
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0  # Alpha must be non-zero!
+        
+        # Define the points you want to connect
+        p1 = Point(x=0.0, y=0.0, z=self.zztop)
+        p2 = Point(x=2.0, y=-1.833, z=self.zztop)
+        p3 = Point(x=4.0, y=-3.667, z=self.zztop)
+        p4 = Point(x=6.0, y=-5.5, z=self.zztop)
+        p5 = Point(x=8.0, y=-7.333, z=self.zztop)
+        p6 = Point(x=10.0, y=-9.167, z=self.zztop)
+        p7 = Point(x=12.0, y=-11.0, z=self.zztop)
+        p8 = Point(x=14.0, y=-8.833, z=self.zztop)
+        p9 = Point(x=16.0, y=-6.667, z=self.zztop)
+        p10 = Point(x=18.0, y=-4.5, z=self.zztop)
+        p11 = Point(x=20.0, y=-2.333, z=self.zztop)
+        p12 = Point(x=22.0, y=-0.167, z=self.zztop)
+        p13 = Point(x=24.0, y=2.0, z=self.zztop)
+        p14 = Point(x=26.0, y=-0.167, z=self.zztop)
+        p15 = Point(x=28.0, y=-2.333, z=self.zztop)
+        p16 = Point(x=30.0, y=-4.5, z=self.zztop)
+        p17 = Point(x=32.0, y=-6.667, z=self.zztop)
+        p18 = Point(x=34.0, y=-8.833, z=self.zztop)
+        p19 = Point(x=36.0, y=-11.0, z=self.zztop)
+        p20 = Point(x=38.0, y=-8.833, z=self.zztop)
+        p21 = Point(x=40.0, y=-6.667, z=self.zztop)
+        p22 = Point(x=42.0, y=-4.5, z=self.zztop)
+        p23 = Point(x=44.0, y=-2.333, z=self.zztop)
+        p24 = Point(x=46.0, y=-0.167, z=self.zztop)
+        p25 = Point(x=48.0, y=2.0, z=self.zztop)
+
+        points = [
+        p1, p2, p3, p4, p5,
+        p6, p7, p8, p9, p10,
+        p11, p12, p13, p14, p15,
+        p16, p17, p18, p19, p20,
+        p21, p22, p23, p24, p25
+        ]
+        
+        marker.points = points
+        self.zztop.publish(marker)
 
         #TODO check if the text dict is len, then publish
         #TODO uncomment for text debugging
