@@ -39,6 +39,10 @@ class TreeFinder:
     def __init__(self): 
         self.lock = threading.Lock()
 
+        #------------Pub vars-------------
+        # Topic super takes
+        self.pub_super = rospy.Publisher("/super/goal", PoseStamped, queue_size = 10) 
+
         #Publish beacon/waypoint for found trees
         self.pub_beacon = rospy.Publisher("/Beacons", PointCloud2, queue_size = 10)
 
@@ -58,42 +62,56 @@ class TreeFinder:
 
         self.pub_text = rospy.Publisher('/TEXT', MarkerArray, queue_size=10)
 
-        #Sub to cum cloud
-        self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
-        self.cloud_section_one = None
-        self.cloud_section_two = None
+        self.zztop = rospy.Publisher('ZZTOP', Marker, queue_size=10)
 
+
+
+        #------------Sub vars-------------
+        self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
         self.latest_cloud = None
+        self.processed_cloud_list = deque(maxlen = self.pancake_stacks*2)
+
+        #Odom var to hold the x,y,z odom data
+        self.latest_pos = None
+
+        self.sub = rospy.Subscriber("/Odometry", Odometry, self.odom_cb, queue_size = 10)
         
+        #Flag to see if there is available odom data to check dist_to_goal
+        self.is_odom = False
+
+
+
+        #------------Pancake PARAMS------------- #XXX tuning!!!
         self.pancake_stacks = 7
         self.pancake_start = round(5 * 0.067, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
         self.pancake_gap = round(1* 0.067, 5) #TODO This has to be small for new alg
         self.pancake_thickness = round(3 * 0.067, 5)
         self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
+
+        self.publish_list = deque(maxlen =self.pancake_stacks*1)
+
+
+
+        #------------PCA kd tree vars-------------
+        self.hor_rms_threshold = 0.2 #Measure of how spread horizontally #XXX tuning!!!
+        self.elongation_num_threshold = 1 #ranges 0-1, higher is more "circular" #XXX tuning!!!
+
         self.xy = None
         self.centroid_list = None
-
         self.eps         = rospy.get_param("~dbscan_eps", 0.25)
         self.min_samples = rospy.get_param("~dbscan_min_samples", 5)
-
         self.debug_plot  = rospy.get_param("~debug_plot", False)
         self.plot_period = rospy.get_param("~plot_period", 2.0)   # seconds
         self.plot_dir    = os.path.expanduser(
             rospy.get_param("~plot_dir", "~/ishb_ws/debug_plots"))
-
         if self.debug_plot:
             os.makedirs(self.plot_dir, exist_ok=True)
             self._fig, self._ax = plt.subplots(figsize=(6, 6), dpi=90)
             self._last_plot_tall = rospy.Time(0)
             self._last_plot_short = rospy.Time(0)
-
-        self.cand_trees = np.zeros(self.pancake_stacks,dtype = object)
         self.last_plot = None
-        self.processed_cloud_list = deque(maxlen = self.pancake_stacks*2)
 
-        self.publish_list = deque(maxlen =self.pancake_stacks*1)
 
-        #------New alg---------
         self.mid_z_dict = defaultdict(dict) #Stores relevant info for mid z slice clusters: cluster, num pts in cluster, centriod
         self.mid_n_clusters = 0
         self.clustered_cloud_list = deque(maxlen = 50)
@@ -108,22 +126,34 @@ class TreeFinder:
 
         self.kd_tree_PCA_done = False
 
+
+
+        #------------Persistence PARAMS/vars-------------
         self.persistence_list = []
         self.tol = 0.08
-        self.goal_tol = 0.5
+        self.goal_tol = 0.67 #XXX tuning!!! 
 
-        self.persistence_freq = 0
+        self.freq_percent = 0.5 #XXX tuning!!!
 
+        self.persistence_dur = 3 #XXX tuning!!!
+        self.on_timer_dur = 0.1
+        self.goal_timer_dur = 5 #XXX tuning!!!
+
+
+        self.persisted_scores_weight = 3 #XXX tuning!!!
+        self.norms_scores_weight = 2 #XXX tuning!!!
+
+        self.per_waypt_weight = 0.03 #XXX tuning!!!
+        self.norm_waypt_weight = 10 #XXX tuning!!!
+
+
+        self.linelen = 2 #XXX tuning!!!
+        self.backlen = 0.5 #XXX tuning!!!
+
+
+        self.max_pers_counts = self.persistence_dur / self.on_timer_dur #Maximum possible counts is the duration of persistence, divided by how often you add to the persistence_list
         self.pub_persisted_array = np.zeros(0)
 
-        self.persistence_dur = 3
-        self.on_timer_dur = 0.1
-        #Maximum possible counts is the duration of persistence, divided by how often you add to the persistence_list
-        self.max_pers_counts = self.persistence_dur / self.on_timer_dur
-        self.persisted_scores_weight = 1
-        self.norms_scores_weight = 1
-
-        #TODO 1) add zz pts artifically
         self.all_persisted_array = np.array([
             [0.0,   0.0,    0.0, -1.0, 0.0],
             [2.0,  -1.833,  0.0, -2.0, 0.0],
@@ -154,20 +184,15 @@ class TreeFinder:
 
         self.waypoint_index = 0
 
-        self.per_waypt_weight = 1.0
-        self.norm_waypt_weight = 1.0
-
-        self.zztop = rospy.Publisher('ZZTOP', Marker, queue_size=10)
-
         self.num_waypts = 25
+
+        self.cur_to_go = np.zeros(0)
         
         self.qbeen = np.zeros(0)
 
-        self.linelen = 2
-        self.backlen = 0.5
         self.hlines = []
 
-        self.freq_percent = 0.5
+        self.max_index = 0
 
         self.trunc_deci = 5
         self.trunc_factor = 10 ** 5
@@ -176,33 +201,14 @@ class TreeFinder:
 
         self.intersect_pub_array = np.zeros(0)
 
-        #TODO organize init, and add a section of all things can tune
 
-        #Odom var to hold the x,y,z odom data
-        self.latest_pos = None
 
-        self.sub = rospy.Subscriber("/Odometry", Odometry, self.odom_cb, queue_size = 10)
-        
-        #Flag to see if there is available odom data to check dist_to_goal
-        self.is_odom = False
-
-        # Topic super takes
-        self.pub_super = rospy.Publisher("/super/goal", PoseStamped, queue_size = 10) 
-
-        #Timer
+        #------------Timer vars-------------
         rospy.Timer(rospy.Duration(self.on_timer_dur), self.on_timer)  # 10 Hz
 
         rospy.Timer(rospy.Duration(self.persistence_dur), self.persistence_timer)  # 1 Hz
 
-        
-
-
-
-        #TODO OLD STUFF: Tree Confirmation Parameters
-
-        #Step 1: Is Line
-        self.hor_rms_threshold = 0.2 #Measure of how spread horizontally
-        self.elongation_num_threshold = 1 #ranges 0-1, higher is more "circular"
+        rospy.Timer(rospy.Duration(self.goal_timer_dur), self.goal_timer)
         
 
 
@@ -274,6 +280,7 @@ class TreeFinder:
             @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice. If kd_tree_PCA is done, based on a flag, then relevant list and dicts for this class's operations are cleared to ensure data is refreshed.
             @param event An object of TimerEvent, automatically created every time rospy.Timer fires.
             @see centroid_finder"""
+
         i = 1
 
         self.mid_count = 0 #reset the mid_count for kd_tree_PCA
@@ -290,25 +297,12 @@ class TreeFinder:
 
                     self.centroid_finder(pancake_num, is_mid)
 
-                    # if e_array is not None:
-                    #     # not_zero_mask = [e_array != (0,0,0,0,0,0)]
-                    #     # print("EARRAY: ", e_array)
-                    #     # print("EARRAY shape: ", e_array.shape)
-
-                    #     not_zero_mask = np.any(e_array != 0, axis =1)
-                    #     # print("HERE IS not zero mask: ", not_zero_mask)
-                    #     cleaned_e_array = e_array[not_zero_mask]
-
-                    #     self.cand_trees[pancake_num] = cleaned_e_array
-
                     i += 1
 
                     
                         
 
                             #TODO somehwere in on_timer, need to call func for kd tree and PCA
-                # print("HERE is self.cand_tree: ", self.cand_trees)
-                # print("HERE is self.cand_tree shape: ", self.cand_trees.shape
                 if self.kd_tree_PCA_done == True:
                     self.publ()
                     self.pub_line_list.clear()
@@ -316,7 +310,6 @@ class TreeFinder:
                     self.text_dict.clear()
                     self.mid_z_dict.clear() #Clear dict for mid slice, before poulate again with new clustering
                     self.clustered_cloud_list.clear()
-            #TODO  call cluster categorizing steps 2-4 funcs here
 
     def centroid_finder(self, which, is_mid):
         """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
@@ -709,10 +702,10 @@ class TreeFinder:
 
             #Finding the unique centroid with the highest count. #TODO May replace with highest possible count in self.persistence_dur.
             max_count = self.max_pers_counts #TODO fixing the coutn col cuz now the 4th one
-            self.persistence_freq = max_count * self.freq_percent #This is our count threshold
+            persistence_freq = max_count * self.freq_percent #This is our count threshold
 
             #Construting a boolean mask of counts that pass our count threshold. This is applied to frequencies to get the "persisted" centriods.
-            persist_mask = frequencies[:,3] > self.persistence_freq
+            persist_mask = frequencies[:,3] > persistence_freq
             persisted = frequencies[persist_mask]
             # print("persisted: ", persisted)
 
@@ -819,7 +812,11 @@ class TreeFinder:
             # print("HERE is len of lines: ", t)
             # print("i am t : :----", t)
             #Creating another boolean mask for valid lines
-            valid = (nonpar) & (t[:,0] >= -self.backlen) & (t[:,1] >= -self.backlen) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
+            #Only compare rows solved above (nonpar); the rest are still NaN and would
+            #trigger spurious "invalid value" warnings on comparison
+            valid = np.zeros(len(i), dtype=bool)
+            tnp = t[nonpar]
+            valid[nonpar] = (tnp[:,0] >= -self.backlen) & (tnp[:,1] >= -self.backlen) & (tnp[:,0] <= self.linelen) & (tnp[:,1] <= self.linelen)
 
             self.make_lines()
 
@@ -909,7 +906,7 @@ class TreeFinder:
                 # print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
-        # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
+        print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
 
     def scoring_func(self, persisted_array_all):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
@@ -933,10 +930,10 @@ class TreeFinder:
         #-----Waypt persistence scoring----
         waypts = persisted_array_all[waypts_mask & not_been_mask]
 
-        print("HERE is waypt mask: ", waypts_mask)
-        print("HERE is not been mask: ", not_been_mask)
-        print("HERE is waypt mask anded with not been mask: ", waypts_mask & not_been_mask)
-        print("waypts: ", waypts, "\n")
+        # print("HERE is waypt mask: ", waypts_mask)
+        # print("HERE is not been mask: ", not_been_mask)
+        # print("HERE is waypt mask anded with not been mask: ", waypts_mask & not_been_mask)
+        # print("waypts: ", waypts, "\n")
 
         #Since we filter ones alr been to, can just pick first one (and will always want to go sequentially)
         waypt = waypts[0] #TODO change when we dont hardcode zigzag anymore,and use index give by count column
@@ -971,25 +968,27 @@ class TreeFinder:
 
 
 
-            #Assesment, whichever linear combination is highest 
+            #Assesment, whichever linear combination is highest
+            print("\n------------------------------") 
+            print("HERE is per scores: ", persisted_scores)
+            print("HERE is norm scores: ", norms_score)
             assesment = persisted_scores - norms_score
             print("HERE is asses: ", assesment)
+            print("------------------------------\n") 
 
             #Finding the index of the max_score, this will be the tree we go to
-            max_index = np.argmax(assesment)
+            self.max_index = np.argmax(assesment)
 
             #TODO Add conditional see if max_index == last row (shape[0]) --> means a waypt!
             # print("HERE is max_indx: ", max_index)
-            if max_index == assesment.shape[0]-1:
+            if self.max_index == assesment.shape[0]-1:
                 print("HERE IS Where to go for a WAYPOINT: ", waypt[0:2])
-                to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
-                self.to_go(to_go)
+                self.cur_to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
+                self.to_go(self.cur_to_go)
             else:
-                print("HERE IS Where to go for a TREE: ", trees[max_index, 0:2])
-                to_go = trees[max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
-                self.to_go(to_go)
-
-            self.dist_to_goal(to_go) #TODO maybe put somehwere else where updated more than 3 secs? MAybe fine b/c assention
+                print("HERE IS Where to go for a TREE: ", trees[self.max_index, 0:2])
+                self.cur_to_go = trees[self.max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
+                self.to_go(self.cur_to_go)
 
     def to_go(self, to_go):
         """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
@@ -1034,9 +1033,10 @@ class TreeFinder:
         distance = math.sqrt(squared_sum)
 
         #If the to_go has been reached, then add qto_go 
-        # print("D: ", distance)
+        #print("D: ", distance)
         if distance < self.goal_tol:
-            # print("waypt reached")
+
+            print("waypt reached")
             #Flip the been col value to 1 for the centriod we went to
             #TODO where is togo in self.all_ersiste... quantize it first?
             qall_persisted_array = np.floor(self.all_persisted_array / self.tol) * self.tol
@@ -1098,6 +1098,13 @@ class TreeFinder:
         #     for i in range(vec.shape[0]):
         #         self.hlines.append(line * vec[i] + p1par)
 
+
+#------------------------------------------------------------------------------------------------Goal Timer----------------------------------------------------------------------------------
+    def goal_timer(self, event):
+        # with self.lock:
+        if self.cur_to_go.size != 0:
+            self.dist_to_goal(self.cur_to_go)
+            
 #---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
     def publ(self):
         """!@brief"""
@@ -1284,16 +1291,6 @@ class TreeFinder:
         #     marker.points = point_list
 
         #     self.pub_line.publish(marker)
-
-    
-        # if len(self.cand_trees):
-        #     all_e_arrays = np.vstack(self.cand_trees)
-
-        #     all_points = np.column_stack((all_e_arrays[:, 4:6], all_e_arrays[:, 3]))
-        #     beacons = self.make_pointcloud2_xyz32(header, all_points)
-
-        #     self.pub_beacon.publish(beacons)
-
     
 
 def main():
