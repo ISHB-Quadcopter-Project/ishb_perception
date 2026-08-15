@@ -110,7 +110,7 @@ class TreeFinder:
 
         self.persistence_list = []
         self.tol = 0.08
-        self.goal_tol = 1
+        self.goal_tol = 0.5
 
         self.persistence_freq = 0
 
@@ -158,6 +158,8 @@ class TreeFinder:
         self.norm_waypt_weight = 1.0
 
         self.zztop = rospy.Publisher('ZZTOP', Marker, queue_size=10)
+
+        self.num_waypts = 25
         
         self.qbeen = np.zeros(0)
 
@@ -761,7 +763,7 @@ class TreeFinder:
             # print(self.pub_persisted_array)
     
     def hasbeenhere(self):
-        if len(self.all_persisted_array) > 25:
+        if len(self.all_persisted_array) > self.num_waypts:
             #Direcctions of the angles in polar
             waypts_mask = self.all_persisted_array[:,3] < 0
             not_waypts = ~waypts_mask
@@ -792,13 +794,13 @@ class TreeFinder:
 
             #parrallel case, do min distance from d1 vector normal
             parallel = ~nonpar
-            print("parallel mask: ", parallel)
+            # print("parallel mask: ", parallel)
             d1par = d1[parallel]
             p1par = p1[parallel]
             p2par = p2[parallel]
             n = np.column_stack((-d1par[:, 1], d1par[:, 0]))
             parallel_dist = np.abs(np.sum((p2par - p1par) * n, axis=1))
-            print("parallel_dist: " , parallel_dist)
+            # print("parallel_dist: " , parallel_dist)
             self.make_perplines((p2par - p1par) * n,1,p1par)
             par_mask = parallel_dist < 1 #TODO MAKE ME GLOBAL TUNABLE BUDDY 
 
@@ -815,7 +817,7 @@ class TreeFinder:
             t[nonpar] = np.linalg.solve(matrixA[nonpar], b[nonpar])
 
             # print("HERE is len of lines: ", t)
-            print("i am t : :----", t)
+            # print("i am t : :----", t)
             #Creating another boolean mask for valid lines
             valid = (nonpar) & (t[:,0] >= -self.backlen) & (t[:,1] >= -self.backlen) & (t[:,0] <= self.linelen) & (t[:,1] <= self.linelen)
 
@@ -861,9 +863,9 @@ class TreeFinder:
 
                     index1 = np.where(np.all(self.all_persisted_array[:,0:2] == p1par_all[x], axis=1))[0][0]
                     index2 = np.where(np.all(self.all_persisted_array[:,0:2] == p2par_all[x], axis=1))[0][0]
-
-                    ind_list1.append(index1)
-                    ind_list2.append(index2)
+                    if index1 > 26 and index2 > 26:
+                        ind_list1.append(index1)
+                        ind_list2.append(index2)
 
             # print("HERE is in_list2: ", ind_list2)
             # print("size of allpersistedarray[indlist2] out o the loop", self.all_persisted_array[ind_list2, :])
@@ -895,7 +897,7 @@ class TreeFinder:
             persisted = np.trunc(persisted * self.trunc_factor) / self.trunc_factor
 
         #TODO 2) check if exact same size starrted with
-        if self.all_persisted_array.shape == (25,):
+        if self.all_persisted_array.shape == (self.num_waypts,):
             self.all_persisted_array = np.vstack((self.all_persisted_array, persisted))
         else:
             #Only bookkeeping on trees, not waypts
@@ -904,7 +906,7 @@ class TreeFinder:
             #Checking if quantized persisted are alreadly in quantized self.all_persisted_array. Note: We use quantized since we are doing simliarity checks.
             notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array[not_waypts] / self.tol) * self.tol, invert = True).all(axis = 1)
             if qpersisted[:,0:2][notin_mask].size != 0:
-                print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
+                # print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
         # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
@@ -930,6 +932,11 @@ class TreeFinder:
 
         #-----Waypt persistence scoring----
         waypts = persisted_array_all[waypts_mask & not_been_mask]
+
+        print("HERE is waypt mask: ", waypts_mask)
+        print("HERE is not been mask: ", not_been_mask)
+        print("HERE is waypt mask anded with not been mask: ", waypts_mask & not_been_mask)
+        print("waypts: ", waypts, "\n")
 
         #Since we filter ones alr been to, can just pick first one (and will always want to go sequentially)
         waypt = waypts[0] #TODO change when we dont hardcode zigzag anymore,and use index give by count column
@@ -966,7 +973,7 @@ class TreeFinder:
 
             #Assesment, whichever linear combination is highest 
             assesment = persisted_scores - norms_score
-            # print("HERE is asses: ", assesment)
+            print("HERE is asses: ", assesment)
 
             #Finding the index of the max_score, this will be the tree we go to
             max_index = np.argmax(assesment)
@@ -1034,7 +1041,10 @@ class TreeFinder:
             #TODO where is togo in self.all_ersiste... quantize it first?
             qall_persisted_array = np.floor(self.all_persisted_array / self.tol) * self.tol
 
-            row,cols = np.where(qall_persisted_array[:,0:2] == qto_go)
+            #.all(axis = 1) makes this a row-wise match: BOTH x and y must equal qto_go.
+            #Without it the comparison is element-wise, so any row merely sharing an x OR a y gets flagged.
+            row = np.where((qall_persisted_array[:,0:2] == qto_go).all(axis=1))[0]
+
             # print("self.all_persisted_array[row,3] : ::: : :: : :", self.all_persisted_array[row,3])
             # if self.all_persisted_array[row,3].all(axis = 1) < 0:
             #     print("------GOING TO WAYPOINT-----")
