@@ -21,6 +21,8 @@ from geometry_msgs.msg import Point
 
 from common import *
 
+from boustrophedon import *
+
 from geometry_msgs.msg import PoseStamped
 
 import warnings
@@ -66,6 +68,16 @@ class TreeFinder:
 
 
 
+
+        #------------Pancake PARAMS------------- #XXX tuning!!!
+        self.pancake_stacks = 7
+        self.pancake_start = round(5 * 0.067, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
+        self.pancake_gap = round(1* 0.067, 5) #TODO This has to be small for new alg
+        self.pancake_thickness = round(3 * 0.067, 5)
+        self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
+
+        self.publish_list = deque(maxlen =self.pancake_stacks*1)
+
         #------------Sub vars-------------
         self.sub = rospy.Subscriber("/Cum_Cloud", PointCloud2, self.cloud_cb, queue_size = 10)
         self.latest_cloud = None
@@ -78,17 +90,6 @@ class TreeFinder:
         
         #Flag to see if there is available odom data to check dist_to_goal
         self.is_odom = False
-
-
-
-        #------------Pancake PARAMS------------- #XXX tuning!!!
-        self.pancake_stacks = 7
-        self.pancake_start = round(5 * 0.067, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
-        self.pancake_gap = round(1* 0.067, 5) #TODO This has to be small for new alg
-        self.pancake_thickness = round(3 * 0.067, 5)
-        self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
-
-        self.publish_list = deque(maxlen =self.pancake_stacks*1)
 
 
 
@@ -131,13 +132,14 @@ class TreeFinder:
         #------------Persistence PARAMS/vars-------------
         self.persistence_list = []
         self.tol = 0.08
-        self.goal_tol = 0.67 #XXX tuning!!! 
+        self.goal_tol = 1 #XXX tuning!!! 
 
         self.freq_percent = 0.5 #XXX tuning!!!
 
         self.persistence_dur = 3 #XXX tuning!!!
         self.on_timer_dur = 0.1
-        self.goal_timer_dur = 5 #XXX tuning!!!
+        self.goal_timer_dur = 0.5 #XXX tuning!!!
+        self.doggy_timer_dur = 4 #XXX tuning!!!
 
 
         self.persisted_scores_weight = 3 #XXX tuning!!!
@@ -146,6 +148,7 @@ class TreeFinder:
         self.per_waypt_weight = 0.03 #XXX tuning!!!
         self.norm_waypt_weight = 10 #XXX tuning!!!
 
+        self.keep_circle = 0.5 #XXX tuning!!!
 
         self.linelen = 2 #XXX tuning!!!
         self.backlen = 0.5 #XXX tuning!!!
@@ -154,37 +157,13 @@ class TreeFinder:
         self.max_pers_counts = self.persistence_dur / self.on_timer_dur #Maximum possible counts is the duration of persistence, divided by how often you add to the persistence_list
         self.pub_persisted_array = np.zeros(0)
 
-        self.all_persisted_array = np.array([
-            [0.0,   0.0,    0.0, -1.0, 0.0],
-            [2.0,  -1.833,  0.0, -2.0, 0.0],
-            [4.0,  -3.667,  0.0, -3.0, 0.0],
-            [6.0,  -5.5,    0.0, -4.0, 0.0],
-            [8.0,  -7.333,  0.0, -5.0, 0.0],
-            [10.0, -9.167,  0.0, -6.0, 0.0],
-            [12.0, -11.0,   0.0, -7.0, 0.0],
-            [14.0, -8.833,  0.0, -8.0, 0.0],
-            [16.0, -6.667,  0.0, -9.0, 0.0],
-            [18.0, -4.5,    0.0, -10.0, 0.0],
-            [20.0, -2.333,  0.0, -11.0, 0.0],
-            [22.0, -0.167,  0.0, -12.0, 0.0],
-            [24.0,  2.0,    0.0, -13.0, 0.0],
-            [26.0, -0.167,  0.0, -14.0, 0.0],
-            [28.0, -2.333,  0.0, -15.0, 0.0],
-            [30.0, -4.5,    0.0, -16.0, 0.0],
-            [32.0, -6.667,  0.0, -17.0, 0.0],
-            [34.0, -8.833,  0.0, -18.0, 0.0],
-            [36.0, -11.0,   0.0, -19.0, 0.0],
-            [38.0, -8.833,  0.0, -20.0, 0.0],
-            [40.0, -6.667,  0.0, -21.0, 0.0],
-            [42.0, -4.5,    0.0, -22.0, 0.0],
-            [44.0, -2.333,  0.0, -23.0, 0.0],
-            [46.0, -0.167,  0.0, -24.0, 0.0],
-            [48.0,  2.0,    0.0, -25.0, 0.0]
-        ], dtype=np.float32)
+        self.all_persisted_array, row_ys = build_persisted_array()
+
+        print("----HERE is apa in init: ", self.all_persisted_array)
 
         self.waypoint_index = 0
 
-        self.num_waypts = 25
+        self.num_waypts = self.all_persisted_array.shape[0]
 
         self.cur_to_go = np.zeros(0)
         
@@ -201,6 +180,8 @@ class TreeFinder:
 
         self.intersect_pub_array = np.zeros(0)
 
+        self.odom_list = []
+
 
 
         #------------Timer vars-------------
@@ -209,10 +190,14 @@ class TreeFinder:
         rospy.Timer(rospy.Duration(self.persistence_dur), self.persistence_timer)  # 1 Hz
 
         rospy.Timer(rospy.Duration(self.goal_timer_dur), self.goal_timer)
+
+        rospy.Timer(rospy.Duration(self.doggy_timer_dur), self.doggy_timer)
         
 
 
     def run(self):
+        # while(not rospy.is_shutdown()):
+        #     self.odom_watchdog() #watchdog here to run to republish if not moving, and checks length of list
         rospy.spin()
 
     
@@ -225,6 +210,7 @@ class TreeFinder:
         
         with self.lock:
             self.latest_pos = msg.pose.pose.position
+            self.odom_list.append(self.latest_pos) #Add odom data to list for odom_watchdog
             self.is_odom = True # latest_pos odom should be set by now
 
     def cloud_cb(self, msg):
@@ -687,6 +673,8 @@ class TreeFinder:
     def persistence(self):
         if len(self.persistence_list):
             #Vertically stack persistence_list, (N,2). Col's x, y centroids
+            # print("HERE is persistence list: ", self.persistence_list)
+
             vpersist = np.vstack(self.persistence_list)
             # print("HERE vpersist shape: ", vpersist.shape)
 
@@ -716,7 +704,7 @@ class TreeFinder:
             
             #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
             # if self.qbeen.size > 0:
-            print("HERE is self.qbeen: ", self.qbeen)
+            # print("HERE is self.qbeen: ", self.qbeen)
             #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
             in_mask = np.isin(qpersisted[:,0:2], self.qbeen).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows #TODO using the false hits on notin_mask, add logic to if the counts better replace
             # print("here is the fresh in_mask foor fresh scans", in_mask)
@@ -906,7 +894,7 @@ class TreeFinder:
                 # print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
-        print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
+        # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
 
     def scoring_func(self, persisted_array_all):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
@@ -942,57 +930,72 @@ class TreeFinder:
 
 
         if self.is_odom:
+            norms_score = np.zeros(0)
             #-----Normal dist scoring----
             drone_x = self.latest_pos.x
             drone_y = self.latest_pos.y
 
-            x_dist = trees[:, 0] - drone_x
-            y_dist = trees[:, 1] - drone_y
+            print("HERE is tree.size: ", trees.size)
 
-            xy_dist = np.column_stack((x_dist, y_dist))
+            if trees.size != 0:
+                x_dist = trees[:, 0] - drone_x
+                y_dist = trees[:, 1] - drone_y
 
-            norms = np.linalg.norm(xy_dist, axis = 1)
-            norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
-            # print("HER is norm_score: ", norms_score)
+                xy_dist = np.column_stack((x_dist, y_dist))
+                norms = np.linalg.norm(xy_dist, axis = 1)
+
+                print("norms BEFORE FILTER: ",  norms)
+                nearby_norms = norms <= (POINT_SPACING* self.keep_circle)
+                norms[nearby_norms] = 100000
+                print("norms AFTER FILTER: ",  norms)
+
+                norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
+                # print("HER is norm_score: ", norms_score)
 
 
-            #-----Waypt dist scoring----
-            wx_dist = waypt[ 0] - drone_x
-            wy_dist = waypt[1] - drone_y
+                #-----Waypt dist scoring----
+                wx_dist = waypt[ 0] - drone_x
+                wy_dist = waypt[1] - drone_y
 
-            wxy_dist = np.column_stack((wx_dist, wy_dist))
+                wxy_dist = np.column_stack((wx_dist, wy_dist))
 
-            wnorm = np.linalg.norm(wxy_dist, axis = 1)
-            wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
-            norms_score = np.append(norms_score, wnorms_score)
+                wnorm = np.linalg.norm(wxy_dist, axis = 1)
+                wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
+                norms_score = np.append(norms_score, wnorms_score)
+
+            else:
+                norms_score = [1]
 
 
 
             #Assesment, whichever linear combination is highest
-            print("\n------------------------------") 
-            print("HERE is per scores: ", persisted_scores)
-            print("HERE is norm scores: ", norms_score)
+            # print("\n------------------------------") 
+            # print("HERE is per scores: ", persisted_scores)
+            # print("HERE is norm scores: ", norms_score)
             assesment = persisted_scores - norms_score
-            print("HERE is asses: ", assesment)
-            print("------------------------------\n") 
+            # print("HERE is asses: ", assesment)
+            # print("------------------------------\n") 
 
             #Finding the index of the max_score, this will be the tree we go to
             self.max_index = np.argmax(assesment)
 
             #TODO Add conditional see if max_index == last row (shape[0]) --> means a waypt!
-            # print("HERE is max_indx: ", max_index)
+            print("HERE is max_indx: ", self.max_index)
             if self.max_index == assesment.shape[0]-1:
                 print("HERE IS Where to go for a WAYPOINT: ", waypt[0:2])
                 self.cur_to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
-                self.to_go(self.cur_to_go)
             else:
                 print("HERE IS Where to go for a TREE: ", trees[self.max_index, 0:2])
                 self.cur_to_go = trees[self.max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
-                self.to_go(self.cur_to_go)
+            print("I AM CUR TO GO UPDATE IN SCORING:", self.cur_to_go)
 
+            # self.to_go(self.cur_to_go)
+         
     def to_go(self, to_go):
         """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
             @details Notice that to_go is not quantized. We want maximum precision to avoid collision."""
+        print("---I GONNA HAVING TO GO---", self.cur_to_go)
+        
         #Creating message to publish
         header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
         #Rviz Point
@@ -1016,17 +1019,18 @@ class TreeFinder:
 
         self.pub_super.publish(msg)
 
-    def dist_to_goal(self, to_go):
+    def dist_to_goal(self, cur_to_go):
         """!@brief Calculates the distance from the current odometry position to the place to go to.
             @details """
         #Quantizing the centroid to go to, to allow for putting this in self.qbeen
-        qto_go = np.floor(to_go / self.tol) * self.tol
+        # print("HERE is latest pos in DIST_TO_GOAL: ", self.latest_pos)
+        qto_go = np.floor(cur_to_go / self.tol) * self.tol
 
         drone_x = self.latest_pos.x
         drone_y = self.latest_pos.y
 
-        dist_x = drone_x - to_go[0]
-        dist_y = drone_y - to_go[1]
+        dist_x = drone_x - cur_to_go[0]
+        dist_y = drone_y - cur_to_go[1]
 
         squared_sum = pow(dist_x, 2) + pow(dist_y, 2)
 
@@ -1035,6 +1039,8 @@ class TreeFinder:
         #If the to_go has been reached, then add qto_go 
         #print("D: ", distance)
         if distance < self.goal_tol:
+
+            # self.to_go(cur_to_go)
 
             print("waypt reached")
             #Flip the been col value to 1 for the centriod we went to
@@ -1059,6 +1065,8 @@ class TreeFinder:
             else:
                 # print("I AM HAVING self.qbeen: ", self.qbeen)
                 self.qbeen = qto_go
+
+            # self.is_odom = False #Set back to false, so can do this func until have odom data
 
 
 
@@ -1098,12 +1106,32 @@ class TreeFinder:
         #     for i in range(vec.shape[0]):
         #         self.hlines.append(line * vec[i] + p1par)
 
-
-#------------------------------------------------------------------------------------------------Goal Timer----------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------Goal and Watchdog Timer----------------------------------------------------------------------------------
     def goal_timer(self, event):
         # with self.lock:
         if self.cur_to_go.size != 0:
             self.dist_to_goal(self.cur_to_go)
+
+    def doggy_timer(self, event):
+        """!@brief Checks if the drone is moving towards the current waypoint
+            @details If the drone is not moving towards the waypoint, it republishes the current waypoint to the /super/goal topic. This function is called by the run function."""
+        # print("HERE is latest pos in WATCHDOG: ", self.latest_pos)
+        
+        #Wating until 5 secs of odom data, to see if drone moving
+        if self.cur_to_go.size != 0:
+            if len(self.odom_list):
+                delta_x = self.odom_list[-1].x - self.odom_list[0].x #last odom x - first odom x, to see if drone moved in x direction
+                delta_y = self.odom_list[-1].y - self.odom_list[0].y
+                delta_z = self.odom_list[-1].z - self.odom_list[0].z
+
+                print("Delta x: ", delta_x)
+                print("Delta y: ", delta_y)
+                print("Delta z: ", delta_z)
+
+                if abs(delta_x) < 0.5 and abs(delta_y) < 0.5 and abs(delta_z) < 0.5: #and abs(delta_z) < 0.5: #Checking if odom x,y,z not changed much, if so then publish goal again so drone move
+                    print("---I AM HAVING DOGGY---")
+                    self.to_go(self.cur_to_go)
+                self.odom_list.clear()
             
 #---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
     def publ(self):
