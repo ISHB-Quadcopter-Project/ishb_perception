@@ -143,10 +143,10 @@ class TreeFinder:
 
 
         self.persisted_scores_weight = 3 #XXX tuning!!!
-        self.norms_scores_weight = 2 #XXX tuning!!!
+        self.norms_scores_weight = 4 #XXX tuning!!!
 
         self.per_waypt_weight = 0.03 #XXX tuning!!!
-        self.norm_waypt_weight = 10 #XXX tuning!!!
+        self.norm_waypt_weight = 4 #XXX tuning!!!
 
         self.keep_circle = 0.5 #XXX tuning!!!
 
@@ -181,6 +181,16 @@ class TreeFinder:
         self.intersect_pub_array = np.zeros(0)
 
         self.odom_list = []
+
+        self.trees = np.zeros(0)
+
+        self.curwaypt = np.zeros(0)
+
+        self.assesment = np.zeros(0)
+
+        self.glo_per_score = np.zeros(0)
+
+        self.glo_norm_score = np.zeros(0)
 
 
 
@@ -924,44 +934,52 @@ class TreeFinder:
         # print("waypts: ", waypts, "\n")
 
         #Since we filter ones alr been to, can just pick first one (and will always want to go sequentially)
-        waypt = waypts[0] #TODO change when we dont hardcode zigzag anymore,and use index give by count column
+        waypt = waypts[0] 
+        self.curwaypt = waypt
+
         waypt_persistence_score = self.max_pers_counts * self.per_waypt_weight
         persisted_scores = np.append(persisted_scores,waypt_persistence_score) #Adding the waypoint maxed per score at bottom, so know its a waypt
 
 
         if self.is_odom:
             norms_score = np.zeros(0)
-            #-----Normal dist scoring----
             drone_x = self.latest_pos.x
             drone_y = self.latest_pos.y
 
             print("HERE is tree.size: ", trees.size)
 
+            self.trees = trees
+
             if trees.size != 0:
                 x_dist = trees[:, 0] - drone_x
                 y_dist = trees[:, 1] - drone_y
-
                 xy_dist = np.column_stack((x_dist, y_dist))
-                norms = np.linalg.norm(xy_dist, axis = 1)
 
-                print("norms BEFORE FILTER: ",  norms)
-                nearby_norms = norms <= (POINT_SPACING* self.keep_circle)
-                norms[nearby_norms] = 100000
-                print("norms AFTER FILTER: ",  norms)
+                wx_dist = waypt[ 0] - drone_x
+                wy_dist = waypt[1] - drone_y
+                wxy_dist = np.column_stack((wx_dist, wy_dist))
 
+                all_dist = np.vstack((xy_dist, wxy_dist))
+
+                #Make a seperrate "all_norms" and use this to the the normalize. then append to the reg norms like we usually do
+                norms = np.linalg.norm(all_dist, axis = 1)
+
+                # print("norms BEFORE FILTER: ",  norms)
+                # nearby_norms = norms <= (POINT_SPACING* self.keep_circle)
+                # norms[nearby_norms] = 100000
+                # print("norms AFTER FILTER: ",  norms)
+
+                #-----Normal dist scoring----
                 norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
                 # print("HER is norm_score: ", norms_score)
 
 
                 #-----Waypt dist scoring----
-                wx_dist = waypt[ 0] - drone_x
-                wy_dist = waypt[1] - drone_y
-
-                wxy_dist = np.column_stack((wx_dist, wy_dist))
-
-                wnorm = np.linalg.norm(wxy_dist, axis = 1)
-                wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
-                norms_score = np.append(norms_score, wnorms_score)
+                # wnorm = np.linalg.norm(wxy_dist, axis = 1)
+                # wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
+                # norms_score = np.append(norms_score, wnorms_score)
+                #choose the last one, and divide by self.normscorewwitght and then mult by -1 and self.wnorms wegith
+                norms_score[norms_score.shape[0] -1] = (norms_score[norms_score.shape[0] -1] / self.norms_scores_weight )* -1 * self.norm_waypt_weight
 
             else:
                 norms_score = [1]
@@ -969,19 +987,23 @@ class TreeFinder:
 
 
             #Assesment, whichever linear combination is highest
-            # print("\n------------------------------") 
-            # print("HERE is per scores: ", persisted_scores)
-            # print("HERE is norm scores: ", norms_score)
-            assesment = persisted_scores - norms_score
-            # print("HERE is asses: ", assesment)
-            # print("------------------------------\n") 
+            print("\n------------------------------") 
+            print("HERE is per scores: ", persisted_scores)
+            print("HERE is norm scores: ", norms_score)
+
+            self.glo_per_score = persisted_scores
+            self.glo_norm_score = norms_score
+
+            self.assesment = persisted_scores - norms_score
+            print("HERE is asses: ", self.assesment)
+            print("------------------------------\n") 
 
             #Finding the index of the max_score, this will be the tree we go to
-            self.max_index = np.argmax(assesment)
+            self.max_index = np.argmax(self.assesment)
 
             #TODO Add conditional see if max_index == last row (shape[0]) --> means a waypt!
-            print("HERE is max_indx: ", self.max_index)
-            if self.max_index == assesment.shape[0]-1:
+            # print("HERE is max_indx: ", self.max_index)
+            if self.max_index == self.assesment.shape[0]-1:
                 print("HERE IS Where to go for a WAYPOINT: ", waypt[0:2])
                 self.cur_to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
             else:
@@ -1177,71 +1199,16 @@ class TreeFinder:
             self.pub_hespline.publish(hline_cloud)
 
 
-        #Zig Zag visualizing
-        marker = Marker()
-        marker.header = header
-        marker.ns = "lines"
-        marker.id = 0
-        
-        # LINE_STRIP connects vertex 0->1, 1->2, etc.
-        marker.type = Marker.LINE_STRIP
-        marker.action = Marker.ADD
-        
-        # Scale determines the line width
-        marker.scale.x = 0.5 
-        
-        # Color (RGBA)
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 1.0  # Alpha must be non-zero!
-        
-        # Define the points you want to connect
-        p1 = Point(x=0.0, y=0.0, z=self.zztop)
-        p2 = Point(x=2.0, y=-1.833, z=self.zztop)
-        p3 = Point(x=4.0, y=-3.667, z=self.zztop)
-        p4 = Point(x=6.0, y=-5.5, z=self.zztop)
-        p5 = Point(x=8.0, y=-7.333, z=self.zztop)
-        p6 = Point(x=10.0, y=-9.167, z=self.zztop)
-        p7 = Point(x=12.0, y=-11.0, z=self.zztop)
-        p8 = Point(x=14.0, y=-8.833, z=self.zztop)
-        p9 = Point(x=16.0, y=-6.667, z=self.zztop)
-        p10 = Point(x=18.0, y=-4.5, z=self.zztop)
-        p11 = Point(x=20.0, y=-2.333, z=self.zztop)
-        p12 = Point(x=22.0, y=-0.167, z=self.zztop)
-        p13 = Point(x=24.0, y=2.0, z=self.zztop)
-        p14 = Point(x=26.0, y=-0.167, z=self.zztop)
-        p15 = Point(x=28.0, y=-2.333, z=self.zztop)
-        p16 = Point(x=30.0, y=-4.5, z=self.zztop)
-        p17 = Point(x=32.0, y=-6.667, z=self.zztop)
-        p18 = Point(x=34.0, y=-8.833, z=self.zztop)
-        p19 = Point(x=36.0, y=-11.0, z=self.zztop)
-        p20 = Point(x=38.0, y=-8.833, z=self.zztop)
-        p21 = Point(x=40.0, y=-6.667, z=self.zztop)
-        p22 = Point(x=42.0, y=-4.5, z=self.zztop)
-        p23 = Point(x=44.0, y=-2.333, z=self.zztop)
-        p24 = Point(x=46.0, y=-0.167, z=self.zztop)
-        p25 = Point(x=48.0, y=2.0, z=self.zztop)
-
-        points = [
-        p1, p2, p3, p4, p5,
-        p6, p7, p8, p9, p10,
-        p11, p12, p13, p14, p15,
-        p16, p17, p18, p19, p20,
-        p21, p22, p23, p24, p25
-        ]
-        
-        marker.points = points
-        self.zztop.publish(marker)
-
         #TODO check if the text dict is len, then publish
         #TODO uncomment for text debugging
         # print("HERE is if kd_tree_PCA_done: ", self.kd_tree_PCA_done)
-        # if len(self.text_dict) > 0:
+        if len(self.text_dict) > 0:
 
-        #     marker_array = MarkerArray()
+            # marker_array = MarkerArray()
 
-        #     for cluster in enumerate(self.text_dict):
+            smarker_array = MarkerArray()
+
+        #    for cluster in enumerate(self.text_dict):
         #         marker = Marker()
         #         marker.header = header
         #         marker.ns = "text_messages"
@@ -1284,9 +1251,47 @@ class TreeFinder:
         #         marker.text = f"hor_rms: {hor_rms}, ver_rms: {ver_rms}, elongation: {elong}, \nx_eig: {x_eig}, x_index: {x_index}, \ny_eig: {y_eig}, y_index: {y_index}, \nz_eig: {z_eig}, z_index: {z_index}"
         #         marker.lifetime = rospy.Duration(0.1)  # Refresh duration
                 
-        #         marker_array.markers.append(marker)
+        #         marker_array.markers.append(marker) 
 
-        #     self.pub_text.publish(marker_array)
+
+            for index in range(self.assesment.shape[0]-1):
+                # print('HERE s index: ', index)
+                marker = Marker()
+                marker.header = header
+                marker.ns = "text_messages"
+                marker.id = index  # Unique ID per text string
+                marker.type = Marker.TEXT_VIEW_FACING
+                marker.action = Marker.ADD
+                if index != self.assesment.shape[0]:
+                    # print("HERE is shape of trees: ", self.trees)
+                    peni = self.trees[index, 0]
+                    marker.pose.position.x = peni
+                    marker.pose.position.y = self.trees[index, 1]
+
+                else:
+                    marker.pose.position.x = self.curwaypt[0]
+                    marker.pose.position.y = self.curwaypt[1]
+
+                marker.pose.position.z = 10
+                marker.pose.orientation.w = 1.0
+
+                # Text scale/size (Z controls height of capital letters)
+                marker.scale.z = 0.7
+
+                # Text color
+                marker.color.r = 0
+                marker.color.g = 0
+                marker.color.b = 1.0
+                marker.color.a = 1.0
+
+                marker.text = f"Asses: {round(self.assesment[index],2)},\nPer: {round(self.glo_norm_score[index],2)},\nNorm: {round(self.glo_norm_score[index],2)}"
+                marker.lifetime = rospy.Duration(1.5)  # Refresh duration
+                smarker_array.markers.append(marker)
+
+                
+
+            # self.pub_text.publish(marker_array)
+            self.pub_text.publish(smarker_array)
 
         # if len(self.PCA_zaxis_list):
         #     marker = Marker()
