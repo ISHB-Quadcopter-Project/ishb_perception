@@ -138,17 +138,17 @@ class TreeFinder:
 
         self.persistence_dur = 3 #XXX tuning!!!
         self.on_timer_dur = 0.1
-        self.goal_timer_dur = 0.5 #XXX tuning!!!
+        self.goal_timer_dur = 0.25 #XXX tuning!!!
         self.doggy_timer_dur = 4 #XXX tuning!!!
 
-
-        self.persisted_scores_weight = 3 #XXX tuning!!!
+        self.tree_const = 1.5 #XXX tuning!!!
+        self.persisted_scores_weight = 1 #XXX tuning!!!
         self.norms_scores_weight = 4 #XXX tuning!!!
 
-        self.per_waypt_weight = 0.03 #XXX tuning!!!
-        self.norm_waypt_weight = 4 #XXX tuning!!!
+        self.per_waypt_weight = 0.02 #XXX tuning!!!
+        self.norm_waypt_weight = 2 #XXX tuning!!!
 
-        self.keep_circle = 0.5 #XXX tuning!!!
+        # self.keep_circle = 0.5 #XXX tuning!!!
 
         self.linelen = 2 #XXX tuning!!!
         self.backlen = 0.5 #XXX tuning!!!
@@ -191,6 +191,8 @@ class TreeFinder:
         self.glo_per_score = np.zeros(0)
 
         self.glo_norm_score = np.zeros(0)
+
+        self.scoring_flag = True
 
 
 
@@ -742,7 +744,9 @@ class TreeFinder:
             #     notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
             #     self.all_persisted_array = self.all_persisted_array[notin_mask]
 
-            #     print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array)
+            #     print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array
+
+            # print("I self.qbeen: ", self.qbeen)
 
             self.scoring_func(self.all_persisted_array)
 
@@ -905,113 +909,131 @@ class TreeFinder:
                 self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
 
         # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
+        print("HERE is apa waypts: ", self.all_persisted_array[0:self.num_waypts,:])
 
     def scoring_func(self, persisted_array_all):
         """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
         #TODO 3) make boool mask for neg counts to filter do normal or scoreing a waypt (dif scoring)
         print("I AM HAVINGGGGGGG")
-        if persisted_array_all.size == 0:
-            print("--------I AM NOT HAVING TRESS!--------")
 
-        waypts_mask = persisted_array_all[:,3] < 0
-        not_waypts = ~waypts_mask
+        drone_x = self.latest_pos.x
+        drone_y = self.latest_pos.y
+        #TODO condiitonal for cur to go
+        if self.cur_to_go.shape[0] != 0:
+            dist_x = drone_x - self.cur_to_go[0]
+            dist_y = drone_y - self.cur_to_go[1]
 
-        not_been_mask = persisted_array_all[:,4] == 0
+            squared_sum = pow(dist_x, 2) + pow(dist_y, 2)
 
-        #-----Normal persistence scoring----
-        trees = persisted_array_all[not_waypts & not_been_mask]
+            distance = math.sqrt(squared_sum)
+            print("D: ", abs(distance))
+        else:
+            print("I AM HAVING HAVING")
+        #Don't score until you have reached the last waypoint(unitl you having!)
+        if self.scoring_flag:
+            if persisted_array_all.size == 0:
+                print("--------I AM NOT HAVING TRESS!--------")
 
-        persisted_counts = trees[:, 3]
-        persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
+            waypts_mask = persisted_array_all[:,3] < 0
+            not_waypts = ~waypts_mask
 
+            not_been_mask = persisted_array_all[:,4] == 0
 
-        #-----Waypt persistence scoring----
-        waypts = persisted_array_all[waypts_mask & not_been_mask]
+            #-----Normal persistence scoring----
+            trees = persisted_array_all[not_waypts & not_been_mask]
 
-        # print("HERE is waypt mask: ", waypts_mask)
-        # print("HERE is not been mask: ", not_been_mask)
-        # print("HERE is waypt mask anded with not been mask: ", waypts_mask & not_been_mask)
-        # print("waypts: ", waypts, "\n")
-
-        #Since we filter ones alr been to, can just pick first one (and will always want to go sequentially)
-        waypt = waypts[0] 
-        self.curwaypt = waypt
-
-        waypt_persistence_score = self.max_pers_counts * self.per_waypt_weight
-        persisted_scores = np.append(persisted_scores,waypt_persistence_score) #Adding the waypoint maxed per score at bottom, so know its a waypt
-
-
-        if self.is_odom:
-            norms_score = np.zeros(0)
-            drone_x = self.latest_pos.x
-            drone_y = self.latest_pos.y
-
-            print("HERE is tree.size: ", trees.size)
-
-            self.trees = trees
-
-            if trees.size != 0:
-                x_dist = trees[:, 0] - drone_x
-                y_dist = trees[:, 1] - drone_y
-                xy_dist = np.column_stack((x_dist, y_dist))
-
-                wx_dist = waypt[ 0] - drone_x
-                wy_dist = waypt[1] - drone_y
-                wxy_dist = np.column_stack((wx_dist, wy_dist))
-
-                all_dist = np.vstack((xy_dist, wxy_dist))
-
-                #Make a seperrate "all_norms" and use this to the the normalize. then append to the reg norms like we usually do
-                norms = np.linalg.norm(all_dist, axis = 1)
-
-                # print("norms BEFORE FILTER: ",  norms)
-                # nearby_norms = norms <= (POINT_SPACING* self.keep_circle)
-                # norms[nearby_norms] = 100000
-                # print("norms AFTER FILTER: ",  norms)
-
-                #-----Normal dist scoring----
-                norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
-                # print("HER is norm_score: ", norms_score)
+            persisted_counts = trees[:, 3]
+            persisted_scores = (persisted_counts / (self.max_pers_counts)) * self.persisted_scores_weight + self.tree_const #Persisted score is based on what the count is divided by the maximum count (see self.max_pers_counts)
 
 
-                #-----Waypt dist scoring----
-                # wnorm = np.linalg.norm(wxy_dist, axis = 1)
-                # wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
-                # norms_score = np.append(norms_score, wnorms_score)
-                #choose the last one, and divide by self.normscorewwitght and then mult by -1 and self.wnorms wegith
-                norms_score[norms_score.shape[0] -1] = (norms_score[norms_score.shape[0] -1] / self.norms_scores_weight )* -1 * self.norm_waypt_weight
+            #-----Waypt persistence scoring----
+            waypts = persisted_array_all[waypts_mask & not_been_mask]
 
-            else:
-                norms_score = [1]
+            # print("HERE is waypt mask: ", waypts_mask)
+            # print("HERE is not been mask: ", not_been_mask)
+            # print("HERE is waypt mask anded with not been mask: ", waypts_mask & not_been_mask)
+            # print("waypts: ", waypts, "\n")
+
+            #Since we filter ones alr been to, can just pick first one (and will always want to go sequentially)
+            waypt = waypts[0] 
+            self.curwaypt = waypt
+
+            waypt_persistence_score = self.max_pers_counts * self.per_waypt_weight
+            persisted_scores = np.append(persisted_scores,waypt_persistence_score) #Adding the waypoint maxed per score at bottom, so know its a waypt
+
+
+            if self.is_odom:
+                norms_score = np.zeros(0)
+                drone_x = self.latest_pos.x
+                drone_y = self.latest_pos.y
+
+                print("HERE is tree.size: ", trees.size)
+
+                self.trees = trees
+
+                if trees.size != 0:
+                    x_dist = trees[:, 0] - drone_x
+                    y_dist = trees[:, 1] - drone_y
+                    xy_dist = np.column_stack((x_dist, y_dist))
+
+                    wx_dist = waypt[ 0] - drone_x
+                    wy_dist = waypt[1] - drone_y
+                    wxy_dist = np.column_stack((wx_dist, wy_dist))
+
+                    all_dist = np.vstack((xy_dist, wxy_dist))
+
+                    #Make a seperrate "all_norms" and use this to the the normalize. then append to the reg norms like we usually do
+                    norms = np.linalg.norm(all_dist, axis = 1)
+
+                    # print("norms BEFORE FILTER: ",  norms)
+                    # nearby_norms = norms <= (POINT_SPACING* self.keep_circle)
+                    # norms[nearby_norms] = 100000
+                    # print("norms AFTER FILTER: ",  norms)
+
+                    #-----Normal dist scoring----
+                    norms_score = (norms/np.max(norms)) * self.norms_scores_weight #Dist score is normalized to the max distance. Smaller dist score is betteer
+                    # print("HER is norm_score: ", norms_score)
+
+
+                    #-----Waypt dist scoring----
+                    # wnorm = np.linalg.norm(wxy_dist, axis = 1)
+                    # wnorms_score = - (wnorm/np.max(norms)) * self.norm_waypt_weight
+                    # norms_score = np.append(norms_score, wnorms_score)
+                    #choose the last one, and divide by self.normscorewwitght and then mult by -1 and self.wnorms wegith
+                    norms_score[norms_score.shape[0] -1] = (norms_score[norms_score.shape[0] -1] / self.norms_scores_weight )* -1 * self.norm_waypt_weight
+
+                else:
+                    norms_score = [1]
 
 
 
-            #Assesment, whichever linear combination is highest
-            print("\n------------------------------") 
-            print("HERE is per scores: ", persisted_scores)
-            print("HERE is norm scores: ", norms_score)
+                #Assesment, whichever linear combination is highest
+                # print("\n-------------------------------------------------------------------------------") 
+                # print("HERE is per scores: ", persisted_scores)
+                # print("HERE is norm scores: ", norms_score)
 
-            self.glo_per_score = persisted_scores
-            self.glo_norm_score = norms_score
+                self.glo_per_score = persisted_scores
+                self.glo_norm_score = norms_score
 
-            self.assesment = persisted_scores - norms_score
-            print("HERE is asses: ", self.assesment)
-            print("------------------------------\n") 
+                self.assesment = persisted_scores - norms_score
+                # print("HERE is asses: ", self.assesment)
+                # print("---------------------------------------------------------------------------------\n") 
 
-            #Finding the index of the max_score, this will be the tree we go to
-            self.max_index = np.argmax(self.assesment)
+                #Finding the index of the max_score, this will be the tree we go to
+                self.max_index = np.argmax(self.assesment)
 
-            #TODO Add conditional see if max_index == last row (shape[0]) --> means a waypt!
-            # print("HERE is max_indx: ", self.max_index)
-            if self.max_index == self.assesment.shape[0]-1:
-                print("HERE IS Where to go for a WAYPOINT: ", waypt[0:2])
-                self.cur_to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
-            else:
-                print("HERE IS Where to go for a TREE: ", trees[self.max_index, 0:2])
-                self.cur_to_go = trees[self.max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
-            print("I AM CUR TO GO UPDATE IN SCORING:", self.cur_to_go)
-
-            # self.to_go(self.cur_to_go)
+                #TODO Add conditional see if max_index == last row (shape[0]) --> means a waypt!
+                # print("HERE is max_indx: ", self.max_index)
+                if self.max_index == self.assesment.shape[0]-1:
+                    print("HERE IS Where to go for a WAYPOINT: ", waypt[0:2])
+                    self.cur_to_go = waypt[0:2] #to_go is NOT quantized, since it is an actual place to go to.
+                else:
+                    print("HERE IS Where to go for a TREE: ", trees[self.max_index, 0:2])
+                    self.cur_to_go = trees[self.max_index, 0:2] #to_go is NOT quantized, since it is an actual place to go to.
+                print("I AM CUR TO GO UPDATE IN SCORING:", self.cur_to_go)
+                #False after you set self.cur_to_go (you are not having!)
+                self.scoring_flag = False
+                # self.to_go(self.cur_to_go)
          
     def to_go(self, to_go):
         """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
@@ -1059,12 +1081,13 @@ class TreeFinder:
         distance = math.sqrt(squared_sum)
 
         #If the to_go has been reached, then add qto_go 
-        #print("D: ", distance)
+        # print("D: ", distance)
         if distance < self.goal_tol:
 
             # self.to_go(cur_to_go)
 
             print("waypt reached")
+            self.scoring_flag = True
             #Flip the been col value to 1 for the centriod we went to
             #TODO where is togo in self.all_ersiste... quantize it first?
             qall_persisted_array = np.floor(self.all_persisted_array / self.tol) * self.tol
@@ -1146,9 +1169,9 @@ class TreeFinder:
                 delta_y = self.odom_list[-1].y - self.odom_list[0].y
                 delta_z = self.odom_list[-1].z - self.odom_list[0].z
 
-                print("Delta x: ", delta_x)
-                print("Delta y: ", delta_y)
-                print("Delta z: ", delta_z)
+                # print("Delta x: ", delta_x)
+                # print("Delta y: ", delta_y)
+                # print("Delta z: ", delta_z)
 
                 if abs(delta_x) < 0.5 and abs(delta_y) < 0.5 and abs(delta_z) < 0.5: #and abs(delta_z) < 0.5: #Checking if odom x,y,z not changed much, if so then publish goal again so drone move
                     print("---I AM HAVING DOGGY---")
