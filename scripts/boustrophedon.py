@@ -1,7 +1,7 @@
 import numpy as np
 
 # ---- Mission / rectangle parameters (edit these; they are read at call time) ----
-RECT = dict(x_min=-26.0, x_max=50.0, y_min=-13.0, y_max=4.0)
+RECT = dict(x_min=0, x_max=125.0, y_min=-13.0, y_max=4.0)
 EDGE_BUFFER   = 10.0     # keep-out margin from every rectangle edge (m)
 ROW_SPACING   = 7.0    # <-- tune: target distance between sweep rows (m)
 POINT_SPACING = 6.0    # <-- tune: target distance between consecutive waypoints along ANY leg (m)

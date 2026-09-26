@@ -56,10 +56,10 @@ class Accumulator:
         self.is_odom = False
 
         #For make cloud
-        self.voxel_size = 0.067 #Width of voxels
-        self.numframes = 10 # how long temporal window lasts in seconds * 10, how many saved clouds
+        self.voxel_size = 0.01 #Width of voxels
+        self.numframes = 20 # how long temporal window lasts in seconds * 10, how many saved clouds
         self.cloud_list = deque(maxlen = self.numframes) #List with downsampled cloud entries
-        self.radius = 20 #Bounding radius
+        self.radius = 10 #Bounding radius
         self.cloud_array = None  
         self.voxel_array = None
         self.bounded = None

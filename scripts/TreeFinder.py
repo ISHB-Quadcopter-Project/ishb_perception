@@ -37,7 +37,23 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*non-tuple s
 #When state 3 happens (assecnetion), that's when we know for certain the rad of the tree, and can accurately place waypt,next waypoint can b determined
 
 class TreeFinder:
-    """!@brief Still in development!"""
+    """!@brief Detects candidate trees from an accumulated point cloud, dedups repeat trees, and sequences visiting.
+
+        @details Still in development. The four horsemen pipelines of Treefinder.py:
+        -# **Cloud/odom ingestion** (@ref cloud_cb, @ref odom_cb) — buffers the latest point cloud and
+           odometry, slicing the cloud into horizontal 'pancake' z-bands (@ref cut_cloud).
+        -# **on_timer** (10 Hz) — clusters each z-band (@ref centroid_finder -> @ref clustering -> eigen/@ref is_line),
+           links clusters across bands with a KD-tree and classifies vertical, trunk-like ones via PCA
+           (@ref kd_tree_PCA -> @ref PCA_make_lines / @ref is_vertical), then publishes debug clouds (@ref publ).
+        -# **persistence_timer** (every `persistence_dur` sec) — keeps only detections that recur often enough
+           to trust and merges them into a running candidate array (@ref persistence -> @ref persist_bookkeeping),
+           collapses repeat sightings of the same physical tree from different vantage points (@ref hasbeenhere),
+           and scores/selects the next target (@ref scoring_func).
+        -# **goal_timer / doggy_timer** — track progress toward the current target at goal timer (@ref dist_to_goal) and
+           republish the goal (@ref to_go) if the drone appears stuck at doggy_timer.
+
+        
+        @see on_timer @see persistence_timer @see goal_timer @see doggy_timer"""
     def __init__(self): 
         self.lock = threading.Lock()
 
@@ -68,7 +84,43 @@ class TreeFinder:
 
 
 
-
+        """@par Tunable parameters
+                Set in `__init__`; most flagged `#XXX tuning!!!` there.
+        
+                - __Clustering__
+                  - `eps` (ROS param `~dbscan_eps`, default 0.25) — DBSCAN neighborhood radius.
+                  - `min_samples` (`~dbscan_min_samples`, default 5) — min points to form a cluster.
+                  - `hor_rms_threshold` (0.2) / `elongation_num_threshold` (1) — @ref is_line thresholds separating
+                    line-shaped clusters (branches/ground) from trunk candidates.
+                  - `angle_threshold` (25 deg) — @ref is_vertical cutoff for classifying a cluster's PCA axis as a
+                    vertical trunk.
+                  - `leaf_size` (80) — KDTree leaf size used in @ref kd_tree_PCA.
+                - __Pancake z-slicing__ (see @ref cut_cloud)
+                  - `pancake_stacks` (7) — number of horizontal z-bands scanned per cycle.
+                  - `pancake_start` (5*0.067 m) — height of the lowest band.
+                  - `pancake_gap` (1*0.067 m) — vertical spacing between bands.
+                  - `pancake_thickness` (3*0.067 m) — thickness of each band.
+                - __Persistence/dedup__
+                  - `tol` (0.08 m) — quantization grid used for similarity checks in @ref persistence,
+                    @ref persist_bookkeeping, @ref hasbeenhere, and `self.qbeen`.
+                  - `freq_percent` (0.5) together with `persistence_dur` (3 s) — fraction of the maximum possible hit
+                    count (`self.max_pers_counts`) a centroid must reach within this window to be trusted as a real
+                    tree (see @ref persistence).
+                  - `goal_tol` (1 m) — distance within which a target counts as reached (@ref dist_to_goal).
+                  - `linelen` (2 m) / `backlen` (0.5 m) — sightline length bounds shared by the trunk-line
+                    visualizations (@ref PCA_make_lines, @ref make_lines) and the intersection test in @ref hasbeenhere.
+                - __Scoring__ (@ref scoring_func)
+                  - `tree_const` (1.5), `persisted_scores_weight` (1), `norms_scores_weight` (4),
+                    `per_waypt_weight` (0.02), `norm_waypt_weight` (2) — relative weights combining a candidate's
+                    persistence count against its distance from the drone when picking the next target.
+                - __Timer periods__
+                  - `on_timer_dur` (0.1 s, ~10 Hz), `persistence_dur` (3 s), `goal_timer_dur` (0.25 s),
+                    `doggy_timer_dur` (4 s) — periods of the four `rospy.Timer` callbacks.
+                - __Debug plotting__
+                  - `debug_plot` (ROS param `~debug_plot`, default False) — enables @ref _save_cluster_plot.
+                  - `plot_period` (`~plot_period`, default 2.0 s) and `plot_dir` (`~plot_dir`, default
+                    `~/ishb_ws/debug_plots`) — throttle and output directory for those plots.
+        """
         #------------Pancake PARAMS------------- #XXX tuning!!!
         self.pancake_stacks = 7
         self.pancake_start = round(5 * 0.067, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
@@ -134,7 +186,7 @@ class TreeFinder:
         self.tol = 0.08
         self.goal_tol = 1 #XXX tuning!!! 
 
-        self.freq_percent = 0.5 #XXX tuning!!!
+        self.freq_percent = 0.375 #XXX tuning!!!
 
         self.persistence_dur = 3 #XXX tuning!!!
         self.on_timer_dur = 0.1
@@ -152,14 +204,13 @@ class TreeFinder:
 
         self.linelen = 2 #XXX tuning!!!
         self.backlen = 0.5 #XXX tuning!!!
-
+        self.parallel_dist_threshold = 1 #XXX tuning!!!
 
         self.max_pers_counts = self.persistence_dur / self.on_timer_dur #Maximum possible counts is the duration of persistence, divided by how often you add to the persistence_list
         self.pub_persisted_array = np.zeros(0)
 
         self.all_persisted_array, row_ys = build_persisted_array()
-
-        print("----HERE is apa in init: ", self.all_persisted_array)
+        self.all_persisted_array[:,0]  = self.all_persisted_array[:,0] - 25
 
         self.waypoint_index = 0
 
@@ -208,15 +259,15 @@ class TreeFinder:
 
 
     def run(self):
-        # while(not rospy.is_shutdown()):
-        #     self.odom_watchdog() #watchdog here to run to republish if not moving, and checks length of list
+        """!@brief Blocks the main thread from ending
+            @details All actual work happens in the subscriber callbacks and rospy.Timer threads registered in __init__; this just keeps the node alive."""
         rospy.spin()
 
     
 #---------------------------------------------------------------------------------------Subscriber Thread-----------------------------------------------------------------------------------------
     def odom_cb(self, msg):
         """!@brief Callback function for the /Odometry topic
-            @details Updates the latest odometry position and sets the is_odom flag to True. Odom data is stored in a list for the odom_watchdog to check if the drone is moving.
+            @details Updates the latest odometry position and sets the is_odom flag to True. Odom data is stored in a list for the odom_watchdog to check if the drone is moving. It's also used in building all_persisted_array to find the bearing angle
             @note self.lock is used to ensure other areas of code using odom data don't get partial data, as this callback is in a separate thread
             @param msg The Odometry message received from the /Odometry topic"""
         
@@ -227,7 +278,7 @@ class TreeFinder:
 
     def cloud_cb(self, msg):
         """!@brief Callback function for the /Cum_Cloud topic.
-            @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder
+            @details Adds clouds with specified z-ranges using cut_cloud to a list for centroid_finder, using cloud_to_xyz
             @param msg The PointCloud2 message received from the /Cum_Cloud
             @see cut_cloud"""
         self.latest_cloud = cloud_to_xyz(msg)
@@ -240,11 +291,12 @@ class TreeFinder:
 
     def cut_cloud(self, uncut_cloud, z_mid):
         """!@brief Cuts a point cloud to a specified z-range and returns unique x,y coordinates inside range.
-            @details A boolean for the specified z-range is created, to "cut" the cloud. A bit-packed key is created for the x,y coordinates, to find make finding unique x,y coordinates faster. This part is similar to Accumulator.Accumulator.down_cloud
+            @details Uses boolean mask for specified z-range, to "cut" the cloud. A bit-packed key is created for the x,y coordinates, to find make finding unique x,y coordinates faster. This part is similar to Accumulator.Accumulator.down_cloud. self.pancake_thickness is the thickness of the pancake, and is global not passed as a parameter
             @param uncut_cloud The numpy array point cloud to cut
             @param z_mid The middle height of the z-range to cut
-            @return A numpy array of shape (N, 2) containing the x,y coordinates of the points in the specified z-range"""
-        # print("HERE is pre processed z: ", uncut_cloud[:,2])
+            @return A numpy array of shape (N, 2) containing the x,y coordinates of the points in the specified z-range
+            @see cloud_cb"""
+
         z_high = z_mid + self.pancake_thickness/2
         z_low = z_mid - self.pancake_thickness/2
 
@@ -262,11 +314,8 @@ class TreeFinder:
         _, first = np.unique(key, return_index = True) 
 
         #Below is for rviz publishing
-        # self.publish_list = np.append(self.publish_list,cut_cloud[first],axis = 0)
         self.publish_list.append(cut_cloud[first])
 
-        # print("publish list size: asdfasdfasdfasdf",np.shape(self.publish_list))
-        # print("cut cloud shape asdfasfasfasdfasdf " , np.shape(cut_cloud[first]))
 
         #Return cut_cloud with indices that only include uniqe x,y's
         return cut_cloud[first,0:2] 
@@ -275,9 +324,9 @@ class TreeFinder:
 #--------------------------------------------------------------------------on_timer Thread (that sub and pub both depend on)-------------------------------------------------------------------------------
     def on_timer(self,event):
         """!@brief Timer callback to call centroid_finder on each z-slices. Calls publ too.
-            @details This will pass in a bool flag to centorid_finder dictating whether it is the mid z-slice. If kd_tree_PCA is done, based on a flag, then relevant list and dicts for this class's operations are cleared to ensure data is refreshed.
+            @details This will pass in a bool flag to centroid_finder dictating whether it is the mid z-slice. If kd_tree_PCA is done, based on a flag, then relevant list and dicts for this class's operations are cleared to ensure data is refreshed.
             @param event An object of TimerEvent, automatically created every time rospy.Timer fires.
-            @see centroid_finder"""
+            @see centroid_finder @see publ"""
 
         i = 1
 
@@ -288,7 +337,6 @@ class TreeFinder:
                 mid_num = math.floor(half + 0.5)
                 for pancake_num in range(self.pancake_stacks):
                     is_mid = False
-                    # print("HERE is mid_num: ", mid_num)
 
                     if i == mid_num: #Checking if at the mid z-slice
                         is_mid = True
@@ -300,7 +348,6 @@ class TreeFinder:
                     
                         
 
-                            #TODO somehwere in on_timer, need to call func for kd tree and PCA
                 if self.kd_tree_PCA_done == True:
                     self.publ()
                     self.pub_line_list.clear()
@@ -310,28 +357,21 @@ class TreeFinder:
                     self.clustered_cloud_list.clear()
 
     def centroid_finder(self, which, is_mid):
-        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, then saves relevant info for kd_tree_PCA and also publishing text.
-            @see is_line @see clustering @see kd_tree_PCA
-            @param which An integer value representing which pancake is to be clustered.
-            @todo return is artifact of e_array stuff"""
+        """!@brief Calls clustering on a specified z-slice. If it is the middle z-slice and not line shaped, does a num_pts hard cap filter, and saves RMS, elongation, centroid, amount of points for kd_tree_PCA and also publishing text.
+            @see is_line @see clustering @see kd_tree_PCA @see on_timer
+            @param which An integer value representing which pancake is to be clustered. 
+            @todo Line 355, 1000 is used as a crazy number, and maybe will need to be changed when real lidar comes. return is also artifact of e_array stuff"""
 
-        # print("HERE is which inside of centriod findeer: ", which)
-        # print("proc cloud list[0]: " ,self.processed_cloud_list[0])
         self.kd_tree_PCA_done = False
         if len(self.processed_cloud_list) > which:
             processed_cloud = self.processed_cloud_list[which]
             if len(processed_cloud):
                 labels, n_clusters = self.clustering(processed_cloud, which)
 
-                # self.centroid_list = np.zeros((n_clusters-1,3))
                 if n_clusters > 0:
-                    # e_array = np.zeros((n_clusters-1, 6))
                     self.clustered_cloud_list.append(self.xy[labels != -1])
-                    # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
-
                     for clustnum in range(n_clusters):
                         curr_clust = self.xy[labels == clustnum]
-                        # print("\n------HERE is curr_clust: ", curr_clust, "\n")
 
                         #A 0 or 1 pt cluster has no shape to measure, and would otherwise
                         #register as a tree candidate with rms 0. Not a real cluster, skip.
@@ -348,13 +388,10 @@ class TreeFinder:
 
                         #Populate mid_z_dict if at mid z-sclie
                         if is_mid and not self.is_line(hor_rms, elongation_num):
-                            # print("HERE is curr_clsut: ", curr_clust)
                             num_pts = curr_clust.shape[0]
 
                             if num_pts < 1000: #Checking if the cluster is absurd
 
-                                #TODO replace this call with the filtering func
-                                # print("HERE is num of ptS: ", num_pts)
                                 self.mid_z_dict[clust_name]["num_pts"] = num_pts
                                 self.mid_z_dict[clust_name]["xmean"] = xmean
                                 self.mid_z_dict[clust_name]["ymean"] = ymean
@@ -367,34 +404,22 @@ class TreeFinder:
                                 self.text_dict[clust_name]["elongation_num"] = elongation_num
 
                                 self.mid_count += 1
-                                # print("HERE is mid_count: ", self.mid_count)
-                        
-
-
-
-                            # print("HERE is mid_z_dict: ", self.mid_z_dict)
 
                                 #Populating alr instantiated numpy array in mem. This array holds cluster info for all clusters in a z "pancake" slice
                                 # e_array[clustnum] = [hor_rms, ver_rms, elongation_num, which,xmean,ymean]
 
-                            # print("HER is e_array shape: ", e_array.shape)
-                        #TODO if else statement for returned value for is big func ARTIFACT???
-
-                    #TODO
-                    # print("HERE is count: ", count)
-
                     if which == self.pancake_stacks - 1: 
-                        # print("before calling kd_tree_PCA")
-                        self.kd_tree_PCA(self.mid_count) #Call #TODO filtering func, after for loop so dict is fully populated
-                        # print("after calling kd_tree_PCA")
-                    # return e_array
+                        self.kd_tree_PCA(self.mid_count)
                 return None
 
     #---Fork 1 called by centriod_finder---
     def clustering(self, points, which): 
         """!@brief Clusters a point cloud using DBSCAN and returns the labels and number of clusters.
-            @details calls _save_cluster_plot for debugging purposes.
-            @return The labels and number of clusters"""
+            @details calls _save_cluster_plot for debugging purposes(if the boolean in debug_plot is true).
+            @return The labels and number of clusters
+            @see centroid_finder @see _save_cluster_plot
+            @todo May want to remove the rospy.loginfo eventually, once finished IRL testing and tuning"""
+        
         
         if points.shape[0] < self.min_samples: #num of coordinates to cluster < min samples
             return np.full(points.shape[0], -1, dtype=int), 0 #return [-1,-1,-1] labels anda zero b/s not eenoguh pts to even make one cluster (def no trees nearby)
@@ -421,16 +446,21 @@ class TreeFinder:
             self.xy.shape[0], n_clusters, n_noise)
 
         if self.debug_plot:
-            #TODO EACH new dict will be on their own timer also, if we want to plot seperately, since only one "whcih" layer would run at a time. 
-            #coudl also think about changing the savecluterplot funciton to have multiple plots
-
             now = rospy.Time.now()
             self._save_cluster_plot(self.xy, labels, n_clusters, now ,which)                
 
         return labels, n_clusters
 
-    def _save_cluster_plot(self, xy, labels, n_clusters, stamp ,which): #TODO update the which swiching logic, , mayb ea folder for each time step, chat will do though
-        """!@brief Saves a plot of the clustered point cloud for debugging purposes."""
+    def _save_cluster_plot(self, xy, labels, n_clusters, stamp ,which):
+        """!@brief Saves a plot of the clustered point cloud for debugging purposes.
+            @param xy [in] The (N,2) array of x,y points that were clustered
+            @param labels [in] DBSCAN cluster label per point in xy (-1 marks noise)
+            @param n_clusters [in] Number of non-noise clusters found
+            @param stamp [in] ROS time used to timestamp the output filename
+            @param which [in] Index of the pancake z-slice being plotted, used to compute its height for the plot title/filename
+            @note Only called when self.debug_plot is enabled; writes a PNG to self.plot_dir
+            @todo so very spammy holy cow
+            @see clustering"""
         ax = self._ax
         ax.cla()
 
@@ -471,44 +501,35 @@ class TreeFinder:
     def eigen(self, curr_clust, xmean, ymean):
             """!@brief Calculates the eigenvalues and eigenvectors of a cluster from the covariance matrix.
                 @return The horizontal RMS, vertical RMS, and elongation number of the cluster."""
-            # print("\n------INSIDE EIGEN------")
-            # print("xmean: ", xmean)
-            # print("ymean: ", ymean, "\n")
             #np.cov ignores rowvar=False on a single-row array, collapsing to a 0-d
             #scalar that np.linalg.eig rejects. Need >= 2 points for a covariance anyway.
             if curr_clust.shape[0] >= 2:
 
                 normalized = curr_clust - np.array([xmean,ymean]) #To do it at origin
-                # print("HERE is normalized shape: ", normalized.shape)
 
                 cov_matrix = np.cov(normalized, rowvar = False)
-                #  print("HERE is cov matrix: ", cov_matrix)
-                #  print("HERE is cov matrix shape: ", cov_matrix.shape)
-        
+
                 eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
-                # print("Eigenvalues:\n", eigenvalues)
-                # print("Eigenvectors:\n", eigenvectors)
+
                 hor_rms = math.sqrt(abs(eigenvalues[0]))
                 ver_rms = math.sqrt(abs(eigenvalues[1]))
                 if ver_rms != 0:
                     elongation_num = math.sqrt(hor_rms/ver_rms)
                 else:
                     elongation_num = 0
-                # print("HERE is hor_rms in eign func: ", hor_rms)
-                # print("HERE is ver_rms: ", ver_rms)
-                # print("HERE is elong: ", elongation_num)
-        
+
                 return hor_rms, ver_rms, elongation_num
 
             #Degenerate cluster (0 or 1 pts): no spread to measure
             return 0.0, 0.0, 0.0
 
     def is_line(self, hor_rms, elongation_num):
-        """!@brief Determines if a cluster is line shaped based on horizontal RMS and elongation number.
-            @return True if the cluster is line shaped, False otherwise."""
-        if hor_rms > self.hor_rms_threshold or elongation_num > self.elongation_num_threshold:
-            # print("HERE is hor_rms fFOR LINE ", hor_rms) 
-            # print("HERE is hor_rms fFOR LINE ", elongation_num) 
+        """!@brief Determines if a cluster is line shaped based on horizontal RMS and elongation knobs.
+            @param hor_rms [in] Horizontal RMS spread of the cluster from eigen()
+            @param elongation_num [in] Elongation ratio of the cluster from eigen(), higher means less circular
+            @return True if the cluster is line shaped (e.g. a branch/ground feature rather than a tree trunk), False otherwise.
+            @see centroid_finder"""
+        if hor_rms > self.hor_rms_threshold or elongation_num > self.elongation_num_threshold: 
             return True
 
         return False
@@ -516,8 +537,11 @@ class TreeFinder:
     #---Fork 3 called by centriod_finder---
     def kd_tree_PCA(self, n_clusters):
         """!@brief Creates kd_trees starting at the centroids of the mid-zlice to link clusters across z-slices, then performs PCA.
-            @detail To clarify, the kd_trees is made only from clustered points in all z-slices. This is done to increase resistance to noise for when PCA is applied to these point neightborhoods
-            @see PCA_make_lines"""
+            @detail To clarify, the kd_trees is made only from clustered points in all z-slices. This is done to increase resistance to noise for when PCA is applied to these point neightborhoods. Flag used to avoid errors while publishing prints to rviz
+            @param n_clusters [in] Number of clusters found in the mid z-slice (self.mid_z_dict), each looked up by name and expanded into a local 3D neighborhood for PCA
+            @return None. Side effects: populates self.text_dict per cluster with its principal-axis (eigenvector) info, appends candidate centroids to self.persistence_list when the cluster reads as vertical, and sets self.kd_tree_PCA_done to signal on_timer/publ that fresh results are ready
+            @ todo Can optimize heavily(if tree arrays get super big) if you just append xyz  of fullxyz[label boolean mask] instead of saving lists of x, y, then appending, and then appending , do later later
+            @see PCA_make_lines @see is_vertical @see centroid_finder"""
 
         # print("HERE is txt dict: ", self.text_dict)
         self.kd_tree_PCA_done = False
@@ -528,25 +552,14 @@ class TreeFinder:
             #Adding z values to the clustered cloud list, to make a 3D point cloud for KDTree and PCA, appending to all_pancakes list
             all_pancakes = []
             for i in range(self.pancake_stacks):
-                # print("HERE is i: ", i)
-                # print("HERE is clustered_cloud_list: ", self.clustered_cloud_list)
                 curr_z = self.pancake_start + (self.pancake_gap * i)
                 num_rows = np.shape(self.clustered_cloud_list[i])[0] 
                 z_array = np.ones((num_rows,1)) * curr_z
-                # print("z_array: ", z_array)
-                # print("z_array shape: ", z_array.shape)
                 all_pancakes.append(np.append(self.clustered_cloud_list[i],z_array,axis = 1))
-                # TODO can optimize heavily if you just append xyz  of fullxyz[label boolean mask] instead of saving lists of x, y, then vstacking , do late r later
-
-                # print("HERE is all_panacakes: ", all_pancakes)
+                # TODO can optimize heavily(if tree arrays get super big) if you just append xyz  of fullxyz[label boolean mask] instead of saving lists of x, y, then appending, and then appending , do later later
 
             #V stacks all pancakes verically, to give KDtree all points from all pancakes
             self.all_vpancakes = np.vstack(all_pancakes)
-
-            # print("HERE is all_vpancakes shape: ", self.all_vpancakes.shape)
-            
-            # print("HERE is self.mid_z_dict: ", self.mid_z_dict)
-
             if n_clusters > 0 and len(self.mid_z_dict):
                 # print("INSIDE kd_tree_PCA, after checking n_clusters and mid_z_dict")
                 for i in range(n_clusters): #TODO mayber change back to -1???
@@ -590,20 +603,12 @@ class TreeFinder:
                     max_y_index = np.argmax(all_y)
                     y_eig = fitted_comps[max_y_index]
 
-                    # print("HERE is clust_name in kd_tree_PCa: ", clust_name)
-                    # print("INSIDE kd_tree_PCA")
-
                     self.text_dict[clust_name]["x_eig"] = x_eig
                     self.text_dict[clust_name]["x_index"] = max_x_index
                     self.text_dict[clust_name]["y_eig"] = y_eig
                     self.text_dict[clust_name]["y_index"] = max_y_index
                     self.text_dict[clust_name]["z_eig"] = z_eig
                     self.text_dict[clust_name]["z_index"] = max_z_index
-
-                    
-
-                    # print("HERE is max_z_index: ", max_z_index)
-                    # print("HERE is z_eig: ", z_eig, "\n")
 
                     is_vertical_flag = self.is_vertical(z_eig)
                     if is_vertical_flag:
@@ -620,20 +625,9 @@ class TreeFinder:
                             y = ymean - drone_y
 
                             angle = math.atan2(y,x)
-                            
-                            #TODO get angles from np.atan2(y,x) , make sure it works and gives you a 0 to 2pi  or -pi to pi once more
-                            #TODO in hasbeen, make paramterization of lines and solves for the intersection, then you solve for how far it is from the two centroids (the parameter t)
-                            #TODO now you do the conditional to make sure its not too damn far
-                            #TODO also consider edge case with parallel stuff --> just dont consider it lol
 
                             centriod_xy = np.array([xmean, ymean, angle])
                             self.persistence_list.append(centriod_xy)
-
-
-                        #TODO put centroids in a list, then make another func to be called in on_timer. This func is to make a numpy array from this list and vstack it. Use the vectorized np.unique on this, to get jus tthe uniq centriods. Then use this as 
-                        #a guide for bool mask.sum() to count how many times it in there
-
-                        #Or use np.unqie but with return_counts = True. use vectozied np.uniqe though
 
                     self.PCA_make_lines(z_eig, centriod, is_vertical_flag)
 
@@ -643,7 +637,11 @@ class TreeFinder:
                 self.kd_tree_PCA_done = False
 
     def PCA_make_lines(self, z_axis, centroid, is_vertical_flag):
-        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
+        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed for a certain tree candidate. This is mostly for printing/debugging in rviz
+            @param z_axis [in] The cluster's Z principal-component eigenvector (from kd_tree_PCA), used as the line's direction
+            @param centroid [in] The 3D point (x, y, mid_height) the line is anchored at
+            @param is_vertical_flag [in] Whether is_vertical() classified this axis as vertical enough to be a tree trunk candidate; routes the line into pub_line_list (candidate) vs pub_not_line_list (rejected), for rviz visualization
+            @see kd_tree_PCA"""
         z_axis = abs(z_axis)
         z_basis = z_axis / np.linalg.norm(z_axis)
 
@@ -664,7 +662,9 @@ class TreeFinder:
 
     def is_vertical(self, z_eig):
         """!@brief Determines if the angle of the Z Principal Component overcedes a certain threshold.
-            @return A flag whether the angle threshold is passed or not."""
+            @param z_eig [in] The Z principal-component eigenvector of a cluster's neighborhood, from kd_tree_PCA
+            @return True if the angle between z_eig and the world Z axis is under self.angle_threshold degrees (i.e. the cluster looks like a vertical trunk), False otherwise.
+            @see kd_tree_PCA"""
         dot = np.dot(z_eig, np.array([0,0,1]))
         z_eig_mag = np.linalg.norm(z_eig)
         angle = np.arccos(dot / z_eig_mag) * (180 / np.pi)
@@ -683,6 +683,9 @@ class TreeFinder:
             self.persistence_list.clear() #Clear the list, so new new persistence data is refreshed every self.persistence_dur sec
 
     def persistence(self):
+        """!@brief Aggregates the vertical-cluster centroids seen since the last persistence_dur window into stable, deduplicated tree/waypoint candidates and triggers scoring.
+            @details Quantizes centroids to self.tol to absorb detection jitter, keeps only ones seen frequently enough (self.freq_percent of self.max_pers_counts) to be trusted as real, merges them into the running self.all_persisted_array via persist_bookkeeping, resolves duplicate detections of the same physical tree via hasbeenhere, then re-scores candidates via scoring_func.
+            @see persist_bookkeeping @see hasbeenhere @see scoring_func @see persistence_timer"""
         if len(self.persistence_list):
             #Vertically stack persistence_list, (N,2). Col's x, y centroids
             # print("HERE is persistence list: ", self.persistence_list)
@@ -712,41 +715,17 @@ class TreeFinder:
             #Quantizing persisted to allow for more silimarity checks for bookkeeping
             qpersisted = np.column_stack((np.floor(persisted[:,0:2] / self.tol) * self.tol, persisted[:,3])) #Adding the count col. back on after quantization
 
-            # print("HERE is qpersisted, fresh q: ", qpersisted)
-            
-            #Checking if our numpy array keeping track of trees been at (quantizied) is populated (done in dist_to_goal)
-            # if self.qbeen.size > 0:
-            # print("HERE is self.qbeen: ", self.qbeen)
             #Checking is our quantized persisted centroids have alreadly been visited before. Quantized since we are doing similarity checks.
             in_mask = np.isin(qpersisted[:,0:2], self.qbeen).all(axis = 1) #.all(axis = 1) allows np.isin to look through rows #TODO using the false hits on notin_mask, add logic to if the counts better replace
-            # print("here is the fresh in_mask foor fresh scans", in_mask)
-            # if self.qbeen.size > 0:
-            #     #TODO Quantize?
-            #     in_all_mask = np.isin(self.all_persisted_array, self.qbeen).all(axis = 1)
-            # else:
-            #     in_all_mask = np.ones_like(self.all_persisted_array, dtype=bool)
 
             #Ensuring that qpersisted, and persisted centriods are ones not visited before. Adding this as a 1/0 col at the end. (N,4). Col's x, y, angle, count, been.
             beencol = in_mask.T #or in_all_mask.T
             qpersisted = np.column_stack((qpersisted, beencol))
             persisted = np.column_stack((persisted, beencol))
-    
+            #book keeping to dedup, has been here to continue dedup, then score, no dups in scoring, when tuned right
             self.persist_bookkeeping(qpersisted, persisted)
 
-            #TODO call hespanha's func, before seeing if been here, beacuse this func might add to qbeen
             self.hasbeenhere()
-
-            # print("HERE is qpersisted: ", qpersisted)
-            #Filtering self.all_persisted_array with centroids alreadly visited. This ensures a global list with only unvisited places is given to cost_map.
-            #TODO get rid of b/c
-            # if self.qbeen.size > 0:
-            #     quantized_allp = np.floor(self.all_persisted_array / self.tol) * self.tol
-            #     notin_mask = np.isin(quantized_allp, self.qbeen, invert = True).all(axis = 1)
-            #     self.all_persisted_array = self.all_persisted_array[notin_mask]
-
-            #     print("HERE is self.all_persisted_array after notin: ", self.all_persisted_array
-
-            # print("I self.qbeen: ", self.qbeen)
 
             self.scoring_func(self.all_persisted_array)
 
@@ -758,6 +737,10 @@ class TreeFinder:
             # print(self.pub_persisted_array)
     
     def hasbeenhere(self):
+        """!@brief Detects when two persisted tree centroids are really the same physical tree observed from different vantage points, and merges their visited ('been') flags.
+            @details Each persisted tree row carries the bearing angle from the drone to the tree at detection time; treating that bearing as a sightline through the centroid, every pair of tree rows is tested for whether their sightlines intersect near both points (within [-self.backlen, self.linelen] of each line's parameter) or, if the sightlines are parallel, whether they pass within a small perpendicular distance of each other. Either condition is taken as evidence the two rows are the same tree seen from two positions, so their 'been' column is OR'd together in self.all_persisted_array. Also publishes debug geometry (perp/intersection point clouds) for rviz.
+            @note Only runs once more persisted trees exist than fixed waypoints (self.num_waypts), since the first self.num_waypts rows of self.all_persisted_array are boustrophedon waypoints, not trees.
+            @see persistence @see make_lines"""
         if len(self.all_persisted_array) > self.num_waypts:
             #Direcctions of the angles in polar
             waypts_mask = self.all_persisted_array[:,3] < 0
@@ -784,7 +767,7 @@ class TreeFinder:
             det = matrixA[:, 0, 0] * matrixA[:, 1, 1] - matrixA[:, 0, 1] * matrixA[:, 1, 0]
 
             #Create boolean mask for non par. lines
-            nonpar = np.abs(det) > 0.001
+            nonpar = np.abs(det) > 0.009
 
 
             #parrallel case, do min distance from d1 vector normal
@@ -795,13 +778,9 @@ class TreeFinder:
             p2par = p2[parallel]
             n = np.column_stack((-d1par[:, 1], d1par[:, 0]))
             parallel_dist = np.abs(np.sum((p2par - p1par) * n, axis=1))
-            # print("parallel_dist: " , parallel_dist)
-            self.make_perplines((p2par - p1par) * n,1,p1par)
-            par_mask = parallel_dist < 1 #TODO MAKE ME GLOBAL TUNABLE BUDDY 
 
 
-
-            # print("HERE is nonpar boolean mask: ", nonpar)
+            par_mask = parallel_dist < self.parallel_dist_threshold
 
 
             #nonparallel case, do solve for intersection legnth
@@ -811,8 +790,6 @@ class TreeFinder:
             #Masking t by nonpar to make right size. Then solving linear system to find parameters of the line (len of line for polar, r)
             t[nonpar] = np.linalg.solve(matrixA[nonpar], b[nonpar])
 
-            # print("HERE is len of lines: ", t)
-            # print("i am t : :----", t)
             #Creating another boolean mask for valid lines
             #Only compare rows solved above (nonpar); the rest are still NaN and would
             #trigger spurious "invalid value" warnings on comparison
@@ -836,7 +813,7 @@ class TreeFinder:
 
             intersect_pub_array = (p1par_all + p2par_all) / 2
             const_z_height = np.ones((intersect_pub_array.shape[0], 1)) * 2.67
-            if self.pub_persisted_array.shape != (0,):
+            if self.intersect_pub_array.shape != (0,):
                 self.intersect_pub_array = np.vstack((self.intersect_pub_array,np.column_stack((intersect_pub_array , const_z_height))))
             else:
                 self.intersect_pub_array = np.column_stack((intersect_pub_array , const_z_height))
@@ -888,7 +865,11 @@ class TreeFinder:
             #TODO or just go in order and combine the labels that are of the same tree
 
     def persist_bookkeeping(self, qpersisted, persisted):
-        """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to"""
+        """!@brief Checks incoming persisted are alrealdy in the bookkeeping numpy array. If not, they are added to
+            @param qpersisted [in] Quantized [x, y, count, been] rows (self.tol grid) for the trees that passed the frequency filter this window, used only for similarity comparisons against the quantized self.all_persisted_array
+            @param persisted [in] The same rows as qpersisted but at full precision (truncated to self.trunc_deci decimals), appended to self.all_persisted_array when not already present
+            @note Skips rows already known (matched by quantized x,y against non-waypoint rows of self.all_persisted_array) so the same physical tree isn't added twice.
+            @see persistence"""
         #self.all_persisted_array is a global persisted numpy array. Reminder: (N,4). Col's x, y, angle, count, been.
         # print("HERE is self.all_persisted_array BEFORE: ", self.all_persisted_array)
 
@@ -906,13 +887,23 @@ class TreeFinder:
             notin_mask = np.isin(qpersisted[:,0:2], np.floor(self.all_persisted_array[not_waypts] / self.tol) * self.tol, invert = True).all(axis = 1)
             if qpersisted[:,0:2][notin_mask].size != 0:
                 # print("HERE is qpersisted[:,0:2] notin: ", qpersisted[:,0:2][notin_mask])
-                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in 
+                #TODO Already-known centroids are never updated after their first match here - we just
+                #keep whatever x,y,count was recorded the first time and drop every later re-detection
+                #of the same tree. Need a way to fold in new detections instead (e.g. running average
+                #of x,y, or keep the highest-count/most-confident observation) rather than trusting
+                #only the first persisted hit.
+                self.all_persisted_array = np.vstack((self.all_persisted_array, persisted[notin_mask])) #Adding on persisted not alreadly in
 
         # print("HERE is self.all_persisted_array AFTER: ", self.all_persisted_array)
         print("HERE is apa waypts: ", self.all_persisted_array[0:self.num_waypts,:])
 
     def scoring_func(self, persisted_array_all):
-        """!@brief The next tree to visit is based on a linear combination of persistence and distance scores"""
+        """!@brief The next tree to visit is based on a linear combination of persistence and distance scores
+            @param persisted_array_all [in] The full [x, y, angle, count, been] bookkeeping array (self.all_persisted_array), covering both boustrophedon waypoints (angle < 0) and detected trees
+            @details Trees not yet visited are scored by persistence count (self.persisted_scores_weight) minus normalized distance from the drone (self.norms_scores_weight); the next unvisited waypoint gets its own fixed persistence/distance weighting so it can still win if no tree scores highly. The highest-scoring candidate is written to self.cur_to_go and self.scoring_flag is cleared so scoring is skipped until dist_to_goal() reports that goal reached.
+            @note Only runs while self.scoring_flag is True and requires self.is_odom to compute distances; silently no-ops (aside from prints) otherwise.
+            @bug self.scoring_flag exists specifically to gate this: without it, scoring_func would re-run and recompute self.cur_to_go on every persistence_timer tick before dist_to_goal() ever marks the current target as reached ('been' = 1), causing the drone to skip targets mid-approach and re-visit ones it already scored past.
+            @see persistence @see dist_to_goal"""
         #TODO 3) make boool mask for neg counts to filter do normal or scoreing a waypt (dif scoring)
         print("I AM HAVINGGGGGGG")
 
@@ -1037,7 +1028,9 @@ class TreeFinder:
          
     def to_go(self, to_go):
         """!@brief Publishes a dot for the centriod to go to, as well as a position msg for SUPER
-            @details Notice that to_go is not quantized. We want maximum precision to avoid collision."""
+            @param to_go [in] The (x, y) target position, taken from self.cur_to_go (a tree centroid or waypoint chosen by scoring_func)
+            @details Notice that to_go is not quantized. We want maximum precision to avoid collision.
+            @see doggy_timer @see scoring_func"""
         print("---I GONNA HAVING TO GO---", self.cur_to_go)
         
         #Creating message to publish
@@ -1065,7 +1058,10 @@ class TreeFinder:
 
     def dist_to_goal(self, cur_to_go):
         """!@brief Calculates the distance from the current odometry position to the place to go to.
-            @details """
+            @param cur_to_go [in] The (x, y) target currently being pursued (self.cur_to_go)
+            @details When within self.goal_tol of the target, marks it visited: sets the corresponding row's 'been' column to 1 in self.all_persisted_array, records the quantized target in self.qbeen so hasbeenhere/persist_bookkeeping treat it as already visited, and sets self.scoring_flag so scoring_func picks the next target.
+            @note This is the point in the overall finite state machine where, on reaching a tree, the drone would transition into the ascension state (not yet implemented here) to do close-proximity tree scanning and scaling.
+            @see goal_timer"""
         #Quantizing the centroid to go to, to allow for putting this in self.qbeen
         # print("HERE is latest pos in DIST_TO_GOAL: ", self.latest_pos)
         qto_go = np.floor(cur_to_go / self.tol) * self.tol
@@ -1120,7 +1116,10 @@ class TreeFinder:
         #TODO pass in the persisted numpy array. Then save the normalized counts as persisted scores. Then compute the distance from where rn (from odom) to the centroid of mid z-slice.
 
     def make_lines(self):
-        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
+        """!@brief Builds RVIZ line segments along each persisted tree's stored bearing angle
+            @details For every non-waypoint row of self.all_persisted_array(with [:,3] < 0), constructs a line of 50 points spanning [-self.backlen, self.linelen] along the (cos(angle), sin(angle)) direction, centered at the tree's (x, y); appended to self.hlines for hesp_line_publ to publish.
+            @note Distinct from PCA_make_lines: this uses the persisted tree's stored view-bearing angle, not a PCA Z eigenvector. not published here, just building self.hlines
+            @see hasbeenhere @see hesp_line_publ"""
         waypts_mask = self.all_persisted_array[:,3] < 0
         not_waypts = ~waypts_mask
         trees = self.all_persisted_array[not_waypts]
@@ -1131,35 +1130,23 @@ class TreeFinder:
             length = self.linelen # i thiiink thats what ths is
             line = np.linspace(-self.backlen,length,50)[:,np.newaxis]
 
-            # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
-            # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
 
             for i in range(vec.shape[0]):
                 self.hlines.append(line * vec[i] + trees[i,0:2])
-        #TODO publish
-
-    def make_perplines(self,vec,length,p1par):
-        """!@brief Creates a of lines consistening of 20 points, with a length of 10. These lines represents the Z Principal Component passed in"""
-        pass
-        # if vec.shape != (0,):
-        #     # i thiiink thats what ths is
-        #     line = np.linspace(-length,length,50)[:,np.newaxis]
-
-        #     # const_z_height = np.ones((vec.shape[0], 1)) * 0.67
-        #     # self.pub_persisted_array = np.column_stack((self.all_persisted_array[:, 0:2], const_z_height))
-
-        #     for i in range(vec.shape[0]):
-        #         self.hlines.append(line * vec[i] + p1par)
 
 #------------------------------------------------------------------------------------------------Goal and Watchdog Timer----------------------------------------------------------------------------------
     def goal_timer(self, event):
+        """!@brief Timer callback that checks progress toward the current goal on every tick.
+            @param event [in] TimerEvent automatically supplied by rospy.Timer
+            @see dist_to_goal"""
         # with self.lock:
         if self.cur_to_go.size != 0:
             self.dist_to_goal(self.cur_to_go)
 
     def doggy_timer(self, event):
-        """!@brief Checks if the drone is moving towards the current waypoint
-            @details If the drone is not moving towards the waypoint, it republishes the current waypoint to the /super/goal topic. This function is called by the run function."""
+        """!@brief Watchdog function,periodically checks if the drone is moving towards the current waypoint, added so we wouldn't need to spam super
+            @details If the drone is not moving towards the waypoint, it republishes the current waypoint to the /super/goal topic. Registered as a rospy.Timer callback in __init__, not called directly by run().
+            @see to_go"""
         # print("HERE is latest pos in WATCHDOG: ", self.latest_pos)
         
         #Wating until 5 secs of odom data, to see if drone moving
@@ -1179,16 +1166,22 @@ class TreeFinder:
                 self.odom_list.clear()
             
 #---------------------------------------------------------------------------------------------Publishing Thread--------------------------------------------------------------------------------
-    def publ(self):
-        """!@brief"""
-        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
+    
+    def all_vpancakes_publ(self, header):
+        """!@brief Publishes all vertically-stacked pancake cluster points (self.all_vpancakes) as a PointCloud2 for rviz debugging.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see publ"""
         if self.all_vpancakes.any() != None:
-            #TODO uncomment and fix the can't concatinate error
+            #BUG uncomment and fix the can't concatinate error
             # print("HERE IS publish_list: ", self.publish_list)
             # stacked_pub_list = np.vstack(self.publish_list)
             cluster_cloud = make_pointcloud2_xyz32(header, self.all_vpancakes)
             self.pub_cloud.publish(cluster_cloud)
 
+    def pub_line_list_publ(self, header):
+        """!@brief Publishes the PCA lines of clusters classified as vertical (candidate trees) as a PointCloud2.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see PCA_make_lines @see publ"""
         # print("Before if state here the pub linke ist: ", self.pub_line_list)
         if len(self.pub_line_list):
             # print("HERE is self.pub_line_list: ", self.pub_line_list)
@@ -1196,23 +1189,35 @@ class TreeFinder:
             line_cloud = make_pointcloud2_xyz32(header, line_stacked)
             self.pub_line.publish(line_cloud)
 
+    def pub_not_line_list_publ(self, header):
+        """!@brief Publishes the PCA lines of clusters classified as non-vertical (rejected, not trees) as a PointCloud2.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see PCA_make_lines @see publ"""
         if len(self.pub_not_line_list):
             not_line_stacked = np.vstack(self.pub_not_line_list)
             not_line_cloud = make_pointcloud2_xyz32(header, not_line_stacked)
             self.pub_not_line.publish(not_line_cloud)
 
+    def pub_persisted_array_publ(self, header):
+        """!@brief Publishes the current persisted tree/waypoint positions (self.pub_persisted_array) as a PointCloud2 for rviz.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see publ"""
         if self.pub_persisted_array.shape != (0,):
             persisted_dots = make_pointcloud2_xyz32(header, self.pub_persisted_array)
             self.pub_persisted.publish(persisted_dots)
 
+    def intersect_pub_array_publ(self, header):
+        """!@brief Publishes midpoints between paired centroids that hasbeenhere() flagged as intersecting/near-parallel sightlines, for debugging duplicate-tree detection.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see hasbeenhere @see publ"""
         if self.intersect_pub_array.shape != (0,):
             inter_dots = make_pointcloud2_xyz32(header, self.intersect_pub_array)
             self.pub_intersect.publish(inter_dots)
 
-
-
-
-        # if self.hlines != None:
+    def hesp_line_publ(self,header):
+        """!@brief Publishes the persisted-tree bearing-direction lines (self.hlines) as a PointCloud2 for rviz.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see make_lines @see publ"""
         if len(self.hlines):
             # print("HERE is hlines: ", self.hlines)
             line_stacked = np.vstack(self.hlines)
@@ -1221,62 +1226,68 @@ class TreeFinder:
             hline_cloud = make_pointcloud2_xyz32(header, line_stacked_with_z)
             self.pub_hespline.publish(hline_cloud)
 
-
-        #TODO check if the text dict is len, then publish
-        #TODO uncomment for text debugging
-        # print("HERE is if kd_tree_PCA_done: ", self.kd_tree_PCA_done)
+    def eig_cond_text_publ(self,header):
+        """!@brief Publishes a floating rviz text marker per mid z-slice cluster, showing its RMS/elongation and PCA eigenvector diagnostics for debugging.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @see centroid_finder @see kd_tree_PCA @see publ"""
         if len(self.text_dict) > 0:
 
-            # marker_array = MarkerArray()
+            marker_array = MarkerArray()
 
+                
+
+            for cluster in enumerate(self.text_dict):
+                    marker = Marker()
+                    marker.header = header
+                    marker.ns = "text_messages"
+                    marker.id = cluster[0]  # Unique ID per text string
+                    marker.type = Marker.TEXT_VIEW_FACING
+                    marker.action = Marker.ADD
+
+
+                    clus_num = cluster[1] #API have to do, 0 is index
+                    # Position of the text in 3D space
+                    marker.pose.position.x = self.text_dict[clus_num]["xmean"]
+                    marker.pose.position.y = self.text_dict[clus_num]["ymean"]
+                    marker.pose.position.z = 10
+                    marker.pose.orientation.w = 1.0
+                    
+                    # Text scale/size (Z controls height of capital letters)
+                    marker.scale.z = 0.15
+
+                    # Text color
+                    marker.color.r = 0
+                    marker.color.g = 0
+                    marker.color.b = 1.0
+                    marker.color.a = 1.0
+
+
+                    hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
+                    ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)
+                    elong = round(self.text_dict[clus_num]["elongation_num"], 4)
+
+                    x_eig = np.round(self.text_dict[clus_num]["x_eig"], decimals=4)
+                    x_index = self.text_dict[clus_num]["x_index"]
+                    y_eig = np.round(self.text_dict[clus_num]["y_eig"], decimals=4)
+                    y_index = round(self.text_dict[clus_num]["y_index"], 4)
+                    z_eig = self.text_dict[clus_num]["z_eig"]
+                    z_index = np.round(self.text_dict[clus_num]["z_index"], decimals=4)
+                    
+                    marker.text = f"hor_rms: {hor_rms}, ver_rms: {ver_rms}, elongation: {elong}, \nx_eig: {x_eig}, x_index: {x_index}, \ny_eig: {y_eig}, y_index: {y_index}, \nz_eig: {z_eig}, z_index: {z_index}"
+                    marker.lifetime = rospy.Duration(0.1)  # Refresh duration
+                    
+                    marker_array.markers.append(marker) 
+
+            self.pub_text.publish(marker_array)
+
+
+    def assesment_score_text_publ(self, header):
+        """!@brief Publishes a floating rviz text marker per scored candidate, showing its combined assessment score and persistence/distance components, for debugging scoring_func's target choice.
+            @param header [in] std_msgs Header (frame + timestamp) shared by all publ() outputs this cycle
+            @bug The loop only runs for index in range(self.assesment.shape[0]-1), so index never reaches self.assesment.shape[0] (the `else` branch compares against, meant to catch the waypoint slot per scoring_func's convention); the waypoint candidate is therefore never plotted, and the last tree candidate is skipped.
+            @see scoring_func @see publ"""
+        if len(self.text_dict) > 0:
             smarker_array = MarkerArray()
-
-        #    for cluster in enumerate(self.text_dict):
-        #         marker = Marker()
-        #         marker.header = header
-        #         marker.ns = "text_messages"
-        #         marker.id = cluster[0]  # Unique ID per text string
-        #         marker.type = Marker.TEXT_VIEW_FACING
-        #         marker.action = Marker.ADD
-
-        #         # print("HERE is text dict: ", self.text_dict, "\n")
-        #         clus_num = cluster[1] #API have to do, 0 is index
-        #         # Position of the text in 3D space
-        #         marker.pose.position.x = self.text_dict[clus_num]["xmean"]
-        #         marker.pose.position.y = self.text_dict[clus_num]["ymean"]
-        #         marker.pose.position.z = 10
-        #         marker.pose.orientation.w = 1.0
-                
-        #         # Text scale/size (Z controls height of capital letters)
-        #         marker.scale.z = 0.15
-
-        #         # Text color
-        #         marker.color.r = 0
-        #         marker.color.g = 0
-        #         marker.color.b = 1.0
-        #         marker.color.a = 1.0
-
-        #         # print("INSIDE PUBLISH")
-        #         # print(f"HERE is self.text_dict[{clus_num}]: ", self.text_dict[clus_num])
-        #         # print("\n")
-
-        #         hor_rms = round(self.text_dict[clus_num]["hor_rms"], 4)
-        #         ver_rms = round(self.text_dict[clus_num]["ver_rms"], 4)
-        #         elong = round(self.text_dict[clus_num]["elongation_num"], 4)
-
-        #         x_eig = np.round(self.text_dict[clus_num]["x_eig"], decimals=4)
-        #         x_index = self.text_dict[clus_num]["x_index"]
-        #         y_eig = np.round(self.text_dict[clus_num]["y_eig"], decimals=4)
-        #         y_index = round(self.text_dict[clus_num]["y_index"], 4)
-        #         z_eig = self.text_dict[clus_num]["z_eig"]
-        #         z_index = np.round(self.text_dict[clus_num]["z_index"], decimals=4)
-                
-        #         marker.text = f"hor_rms: {hor_rms}, ver_rms: {ver_rms}, elongation: {elong}, \nx_eig: {x_eig}, x_index: {x_index}, \ny_eig: {y_eig}, y_index: {y_index}, \nz_eig: {z_eig}, z_index: {z_index}"
-        #         marker.lifetime = rospy.Duration(0.1)  # Refresh duration
-                
-        #         marker_array.markers.append(marker) 
-
-
             for index in range(self.assesment.shape[0]-1):
                 # print('HERE s index: ', index)
                 marker = Marker()
@@ -1311,43 +1322,21 @@ class TreeFinder:
                 marker.lifetime = rospy.Duration(1.5)  # Refresh duration
                 smarker_array.markers.append(marker)
 
-                
-
-            # self.pub_text.publish(marker_array)
             self.pub_text.publish(smarker_array)
-
-        # if len(self.PCA_zaxis_list):
-        #     marker = Marker()
-        #     marker.header.frame_id = "world"
-        #     marker.header.stamp = rospy.Time.now()
-        #     marker.ns = "lines"
-        #     marker.id = 0
-        #     marker.type = Marker.LINE_LIST
-        #     marker.action = Marker.ADD
-
-        #     # Line width
-        #     marker.scale.x = 0.05 
-
-        #     # Color (Red, fully opaque)
-        #     marker.color.r = 1.0
-        #     marker.color.g = 0.0
-        #     marker.color.b = 0.0
-        #     marker.color.a = 1.0
-
-        #     point_list = []
-        #     for z_axis in self.PCA_zaxis_list:
-        #         x = z_axis[0]
-        #         y = z_axis[1]
-        #         z = z_axis[2]
-
-        #         p = Point(x=x, y=y, z=z)
-
-        #         point_list.append(p)
-
-        #     marker.points = point_list
-
-        #     self.pub_line.publish(marker)
     
+    def publ(self):
+        """!@brief Publishes all rviz debug topics for the current cycle once kd_tree_PCA has produced fresh results.
+            @details Builds one shared Header and dispatches to each *_publ helper.
+            @see all_vpancakes_publ @see pub_line_list_publ @see pub_not_line_list_publ @see pub_persisted_array_publ @see intersect_pub_array_publ @see hesp_line_publ @see assesment_score_text_publ"""
+        header = std_msgs.msg.Header(frame_id = "camera_init", stamp = rospy.Time.now())
+        self.all_vpancakes_publ(header)
+        self.pub_line_list_publ(header)
+        self.pub_not_line_list_publ(header)
+        self.pub_persisted_array_publ(header)
+        self.intersect_pub_array_publ(header)
+        self.hesp_line_publ(header)
+        self.assesment_score_text_publ(header)
+
 
 def main():
     rospy.init_node("TreeFinder") #Make the node
