@@ -123,9 +123,9 @@ class TreeFinder:
         """
         #------------Pancake PARAMS------------- #XXX tuning!!!
         self.pancake_stacks = 7
-        self.pancake_start = round(5 * 0.067, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
-        self.pancake_gap = round(1* 0.067, 5) #TODO This has to be small for new alg
-        self.pancake_thickness = round(3 * 0.067, 5)
+        self.pancake_start = round(3500 * 0.01, 5)  #5 #TODO make some sorta global arg from config?, or maybe a func that reads odom and updates it
+        self.pancake_gap = round(5* 0.01, 5) #TODO This has to be small for new alg
+        self.pancake_thickness = round(3 * 0.1, 5)
         self.mid_height = round(self.pancake_stacks/2) *self.pancake_gap + self.pancake_start #Not including in calcualtion b/c so small
 
         self.publish_list = deque(maxlen =self.pancake_stacks*1)
